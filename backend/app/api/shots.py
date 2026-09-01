@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from ..db import project_session
-from ..domain import Project, Shot, Take
+from ..domain import Project, Shot, Take, TimelineClip
 from ..domain.base import utcnow
 from ..repositories import next_seq_and_id
 
@@ -107,6 +107,40 @@ def select_take(
     shot.selected_take_id = take_id
     shot.updated_at = utcnow()
     session.add(shot)
+
+    # 规格书第 31 节：切换 Take 后 Timeline 自动引用新 Take
+    clip_stmt = select(TimelineClip).where(
+        TimelineClip.project_id == project_id,
+        TimelineClip.shot_id == shot_id,
+    )
+    for clip in session.exec(clip_stmt):
+        clip.take_id = take_id
+        if take.duration is not None:
+            clip.source_in = min(clip.source_in, take.duration)
+            source_out = clip.source_out if clip.source_out is not None else take.duration
+            clip.source_out = max(clip.source_in, min(source_out, take.duration))
+        session.add(clip)
+
+    # 时长变化后重算 timeline_start，保持时间线连续
+    all_clips = list(
+        session.exec(
+            select(TimelineClip)
+            .where(TimelineClip.project_id == project_id)
+            .order_by(TimelineClip.index)
+        )
+    )
+    start = 0.0
+    for clip in all_clips:
+        clip.timeline_start = start
+        clip_take = session.get(Take, clip.take_id) if clip.take_id else None
+        source_out = (
+            clip.source_out
+            if clip.source_out is not None
+            else (clip_take.duration if clip_take else 0.0)
+        )
+        start += max((source_out or 0.0) - clip.source_in, 0.0)
+        session.add(clip)
+
     session.commit()
     session.refresh(shot)
     return shot

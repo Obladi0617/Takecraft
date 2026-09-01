@@ -5,7 +5,6 @@ from sqlmodel import Session, select
 
 from ..db import project_session
 from ..domain import Shot, Take, TimelineClip
-from ..repositories import next_seq_and_id
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["timeline"])
 
@@ -84,9 +83,8 @@ def auto_edit(project_id: str, session: Session = Depends(project_session)):
     for shot in shots:
         take = session.get(Take, shot.selected_take_id)  # type: ignore[arg-type]
         duration = take.duration if take and take.duration else shot.duration_target
-        _, clip_id = next_seq_and_id(session, TimelineClip, project_id, "clip")
         clip = TimelineClip(
-            id=clip_id,
+            id=f"clip_{index + 1:03d}",
             project_id=project_id,
             index=index,
             shot_id=shot.id,
@@ -114,9 +112,8 @@ def put_timeline(
         source_out = clip_in.source_out
         if source_out is None:
             source_out = clip_in.source_in + _clip_duration(clip_in, shot, take)
-        _, clip_id = next_seq_and_id(session, TimelineClip, project_id, "clip")
         clip = TimelineClip(
-            id=clip_id,
+            id=f"clip_{index + 1:03d}",
             project_id=project_id,
             index=index,
             shot_id=clip_in.shot_id,

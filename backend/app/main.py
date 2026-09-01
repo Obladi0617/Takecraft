@@ -8,6 +8,8 @@ from .config import settings
 
 def create_app() -> FastAPI:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
+    projects_dir = settings.data_dir / "projects"
+    projects_dir.mkdir(parents=True, exist_ok=True)
     app = FastAPI(title="AI Film Agent", version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
@@ -18,7 +20,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(api_router)
     app.mount(
-        "/media", StaticFiles(directory=settings.data_dir), name="media"
+        "/media", StaticFiles(directory=projects_dir), name="media"
     )
 
     @app.get("/api/v1/health")
