@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 前端 / Node
+node_modules/
+dist/
+*.local
+
+# 环境变量与密钥
+.env
+
+# macOS / 编辑器
+.DS_Store
+.idea/
+.vscode/
+
+# 运行时数据（SQLite、项目媒体、渲染产物）
+data/
+*.db
+*.db-journal
+*.sqlite3
