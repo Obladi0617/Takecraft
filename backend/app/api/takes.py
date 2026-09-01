@@ -1,14 +1,70 @@
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from ..db import abs_path, project_session
-from ..domain import Shot, Take
+from ..domain import GenerationJob, Shot, Storyboard, Take
+from ..jobs import generation_queue
 from ..media.ffmpeg import make_proxy, probe_duration
 from ..repositories import next_seq_and_id
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["takes"])
+
+
+class TakeGenerateIn(BaseModel):
+    count: int | None = None
+    prompt: str | None = None
+    force: bool = False
+
+
+@router.post("/shots/{shot_id}/takes/generate", status_code=202)
+async def generate_takes(
+    project_id: str,
+    shot_id: str,
+    body: TakeGenerateIn | None = None,
+    session: Session = Depends(project_session),
+):
+    body = body or TakeGenerateIn()
+    shot = session.get(Shot, shot_id)
+    if shot is None or shot.project_id != project_id:
+        raise HTTPException(status_code=404, detail="shot not found")
+
+    # 规格书：Storyboard 未锁定属于用户可解决的阻塞
+    locked = False
+    if shot.storyboard_id:
+        sb = session.get(Storyboard, shot.storyboard_id)
+        locked = sb is not None and sb.status == "LOCKED"
+    if not locked and not body.force:
+        raise HTTPException(
+            status_code=409,
+            detail="storyboard_not_locked: 请先锁定分镜，或传 force=true 跳过",
+        )
+
+    count = max(body.count or shot.take_count, 1)
+    prompt = body.prompt or shot.description or shot.title
+    jobs = []
+    for _ in range(count):
+        index, job_id = next_seq_and_id(session, GenerationJob, project_id, "job")
+        job = GenerationJob(
+            id=job_id,
+            project_id=project_id,
+            shot_id=shot_id,
+            index=index,
+            job_type="VIDEO",
+            payload={"shot_id": shot_id, "prompt": prompt},
+        )
+        session.add(job)
+        jobs.append(job)
+    session.commit()
+    for job in jobs:
+        session.refresh(job)
+    generation_queue.notify()
+    return {
+        "count": count,
+        "jobs": [j.model_dump() for j in jobs],
+    }
 
 
 @router.post(

@@ -74,3 +74,38 @@ export interface Timeline {
   clips: TimelineClip[]
   duration: number
 }
+
+export interface Storyboard {
+  id: string
+  project_id: string
+  shot_id: string
+  index: number
+  prompt: string
+  negative_prompt: string | null
+  image_path: string
+  width: number
+  height: number
+  model: string
+  seed: number | null
+  status: string
+  created_at: string
+  media_url: string
+  is_selected: boolean
+  is_locked: boolean
+}
+
+export interface GenerationJob {
+  id: string
+  project_id: string
+  shot_id: string | null
+  index: number
+  job_type: string
+  priority: string
+  status: string
+  retry_count: number
+  payload: Record<string, unknown>
+  result: Record<string, unknown>
+  error: string | null
+  created_at: string
+  updated_at: string
+}

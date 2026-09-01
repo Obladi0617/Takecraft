@@ -57,8 +57,7 @@ def _make_engine(project_id: str):
 
 
 def init_project_db(project_id: str):
-    engine = _make_engine(project_id)
-    SQLModel.metadata.create_all(engine)
+    engine = get_engine(project_id)
     _engines[project_id] = engine
     return engine
 
@@ -68,6 +67,8 @@ def get_engine(project_id: str):
     engine = _engines.get(project_id)
     if engine is None:
         engine = _make_engine(project_id)
+        # 幂等：旧项目库在此补建新增的表
+        SQLModel.metadata.create_all(engine)
         _engines[project_id] = engine
     return engine
 

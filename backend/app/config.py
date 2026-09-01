@@ -15,6 +15,9 @@ class Settings(BaseSettings):
             "http://127.0.0.1:5173",
         ]
     )
+    image_backend: str = "mock"  # mock | cloud（阶段3）
+    video_backend: str = "mock"  # mock | dgx | cloud（阶段3）
+    video_generation_concurrency: int = 1  # 规格书第 24 节
 
     model_config = {"env_prefix": "FILMAGENT_"}
 

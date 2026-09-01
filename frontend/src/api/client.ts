@@ -1,4 +1,12 @@
-import type { Project, Scene, Shot, Take, Timeline } from './types'
+import type {
+  GenerationJob,
+  Project,
+  Scene,
+  Shot,
+  Storyboard,
+  Take,
+  Timeline,
+} from './types'
 
 export const API_BASE =
   (import.meta.env.VITE_API_BASE as string | undefined) ??
@@ -104,3 +112,41 @@ export interface RenderResult {
 
 export const renderProject = (pid: string) =>
   api<RenderResult>(`/api/v1/projects/${pid}/render`, { method: 'POST' })
+
+export const fetchStoryboards = (pid: string, shotId: string) =>
+  api<Storyboard[]>(`/api/v1/projects/${pid}/shots/${shotId}/storyboards`)
+
+export const generateStoryboards = (
+  pid: string,
+  shotId: string,
+  body: { prompt?: string; count?: number },
+) =>
+  api<{ job: GenerationJob }>(
+    `/api/v1/projects/${pid}/shots/${shotId}/storyboards/generate`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+
+export const selectStoryboard = (pid: string, sbId: string) =>
+  api<{ ok: boolean }>(`/api/v1/projects/${pid}/storyboards/${sbId}/select`, {
+    method: 'POST',
+  })
+
+export const lockStoryboard = (pid: string, sbId: string) =>
+  api<{ ok: boolean }>(`/api/v1/projects/${pid}/storyboards/${sbId}/lock`, {
+    method: 'POST',
+  })
+
+export const generateTakes = (
+  pid: string,
+  shotId: string,
+  body: { count?: number; prompt?: string; force?: boolean },
+) =>
+  api<{ count: number; jobs: GenerationJob[] }>(
+    `/api/v1/projects/${pid}/shots/${shotId}/takes/generate`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+
+export const fetchGenerationJobs = (pid: string, shotId?: string) =>
+  api<GenerationJob[]>(
+    `/api/v1/projects/${pid}/generation-jobs${shotId ? `?shot_id=${shotId}` : ''}`,
+  )

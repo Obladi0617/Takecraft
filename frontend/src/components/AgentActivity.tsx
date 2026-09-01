@@ -1,23 +1,72 @@
+import { useQuery } from '@tanstack/react-query'
+import { fetchGenerationJobs } from '../api/client'
+import { useAppStore } from '../stores/app'
+
+const STATUS_LABEL: Record<string, string> = {
+  PENDING: '排队中',
+  RUNNING: '生成中',
+  REVIEWING: '待审核',
+  RETAKE: '重抽',
+  DONE: '完成',
+  FAILED: '失败',
+  CANCELLED: '已取消',
+}
+
+const JOB_TYPE_LABEL: Record<string, string> = {
+  STORYBOARD: '分镜',
+  VIDEO: 'Take',
+  CHARACTER: '角色',
+  LOCATION: '场景',
+}
+
 export default function AgentActivity() {
+  const projectId = useAppStore((s) => s.projectId)!
+
+  const { data: jobs } = useQuery({
+    queryKey: ['jobs', projectId],
+    queryFn: () => fetchGenerationJobs(projectId),
+    refetchInterval: 2000,
+  })
+
+  const active = (jobs ?? []).filter((j) =>
+    ['PENDING', 'RUNNING', 'RETAKE'].includes(j.status),
+  )
+
   return (
     <div className="agent-activity">
-      <div className="navigator-heading">Agent 动态</div>
-      <div className="agent-placeholder">
-        <p className="muted">
-          多 Agent 体系将在阶段 3 接入：
-        </p>
-        <ul className="muted">
-          <li>Producer · 生产规划</li>
-          <li>Writer · 剧本</li>
-          <li>Director · 导演方案</li>
-          <li>Prompt · 提示词工程</li>
-          <li>Reviewer · AI Dailies 审核</li>
-          <li>Editor · 自动剪辑</li>
-        </ul>
-        <p className="muted">
-          当前为阶段 1：Shot → Take → 选片 → Timeline → Preview 底层生产链。
-        </p>
+      <div className="navigator-heading">
+        Agent 动态
+        {active.length > 0 && (
+          <span className="badge ok">{active.length} 个任务进行中</span>
+        )}
       </div>
+      <div className="job-list">
+        {(jobs ?? []).length === 0 && (
+          <p className="muted">
+            暂无生成任务。生成分镜或 Take 后在此查看队列状态。
+          </p>
+        )}
+        {(jobs ?? []).slice(0, 20).map((job) => (
+          <div key={job.id} className="job-row">
+            <span className="job-type">
+              {JOB_TYPE_LABEL[job.job_type] ?? job.job_type}
+            </span>
+            <span className="job-id">{job.id}</span>
+            <span className={`job-status ${job.status.toLowerCase()}`}>
+              {STATUS_LABEL[job.status] ?? job.status}
+              {job.retry_count > 0 && ` · 重试${job.retry_count}`}
+            </span>
+            {job.result?.take_id != null && (
+              <span className="muted">{String(job.result.take_id)}</span>
+            )}
+            {job.error && <span className="error job-error">{job.error}</span>}
+          </div>
+        ))}
+      </div>
+      <p className="muted agent-note">
+        多 Agent 编排（Producer / Writer / Director / Prompt / Reviewer /
+        Editor）将在阶段 3 接入 LangGraph。
+      </p>
     </div>
   )
 }
