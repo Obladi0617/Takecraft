@@ -89,11 +89,30 @@ TextModel / VideoUnderstandingModel / ImageGenerator / VideoGenerator
 
 OpenAI、Claude、Gemini、Qwen、MiniMax、Wan、Z-Image 等均可通过 Adapter 替换，无需改动核心业务层。不同 Agent 可分别配置不同模型。
 
+### 云本地协同（后端可切换）
+
+生成后端通过环境变量切换，业务层只依赖统一接口（规格书第 22 节：禁止业务代码直接调用具体模型）：
+
+```bash
+FILMAGENT_IMAGE_BACKEND=modelscope   # mock | modelscope
+FILMAGENT_VIDEO_BACKEND=minimax      # mock | minimax | modelscope
+FILMAGENT_MINIMAX_API_KEY=...        # MiniMax H3 API
+FILMAGENT_MODELSCOPE_API_KEY=...     # ModelScope API-Inference
+```
+
+- **mock**：无 GPU 环境的本地后端（FFmpeg 程序化生成图像 / 视频），保证全链路可离线演示与测试
+- **minimax**：MiniMax H3（任务式提交 → 轮询 → 下载）
+- **modelscope**：ModelScope API-Inference（异步任务协议，图像已按官方契约验证）
+
+### 合规节点
+
+生成链路的三个入口（生成分镜、生成 Take、成片渲染出口）均有前置审核：规则式 Prompt 闸门 + 项目级审计日志（`data/projects/{id}/logs/compliance.jsonl`），命中受限内容即阻断并给出分类原因；阶段 3 的 Reviewer Agent 将在同一闸门上扩展 AI 审核。
+
 ## 路线图
 
 - [x] **阶段 0**：系统设计与规格（[项目概述.md](项目概述.md)）
-- [ ] **阶段 1**：底层生产链（无 AI）——Project → Shot → 上传 / 添加 Take → 选片 → Timeline → 实时 Preview → FFmpeg 渲染
-- [ ] **阶段 2**：ImageGenerator / VideoGenerator Adapter、Storyboard、Take 生成（DGX Spark）
+- [x] **阶段 1**：底层生产链（无 AI）——Project → Shot → 上传 / 添加 Take → 选片 → Timeline → 实时 Preview → FFmpeg 渲染
+- [x] **阶段 2**：ImageGenerator / VideoGenerator Adapter、Storyboard（候选 / 选定 / 锁定）、统一生成队列、Mock + 云 API 后端
 - [ ] **阶段 3**：LangGraph + 全部 6 个 Agent 的完整生产工作流
 
 > 实施原则（规格书第 70 节）：先保证 `Shot → Take → Select → Timeline → Preview` 底层生产链路成立，再让 Agent 接入这条链路，而非先做复杂 Agent。

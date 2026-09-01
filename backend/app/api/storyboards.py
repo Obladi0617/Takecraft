@@ -4,6 +4,7 @@ from sqlmodel import Session, select
 
 from ..db import project_session
 from ..domain import GenerationJob, Shot, Storyboard
+from ..compliance import compliance_gate
 from ..jobs import generation_queue
 from ..repositories import next_seq_and_id
 
@@ -28,6 +29,8 @@ async def generate_storyboards(
     shot = session.get(Shot, shot_id)
     if shot is None or shot.project_id != project_id:
         raise HTTPException(status_code=404, detail="shot not found")
+    prompt = body.prompt or shot.description or shot.title
+    compliance_gate.check_or_raise(prompt, "storyboard.generate", project_id)
     index, job_id = next_seq_and_id(session, GenerationJob, project_id, "job")
     job = GenerationJob(
         id=job_id,
@@ -37,7 +40,7 @@ async def generate_storyboards(
         job_type="STORYBOARD",
         payload={
             "shot_id": shot_id,
-            "prompt": body.prompt or shot.description or shot.title,
+            "prompt": prompt,
             "count": max(body.count, 1),
             "width": body.width,
             "height": body.height,

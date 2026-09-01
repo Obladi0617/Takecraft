@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from ..db import abs_path, project_session
+from ..compliance import compliance_gate
 from ..domain import GenerationJob, Shot, Storyboard, Take
 from ..jobs import generation_queue
 from ..media.ffmpeg import make_proxy, probe_duration
@@ -44,6 +45,7 @@ async def generate_takes(
 
     count = max(body.count or shot.take_count, 1)
     prompt = body.prompt or shot.description or shot.title
+    compliance_gate.check_or_raise(prompt, "take.generate", project_id)
     jobs = []
     for _ in range(count):
         index, job_id = next_seq_and_id(session, GenerationJob, project_id, "job")
