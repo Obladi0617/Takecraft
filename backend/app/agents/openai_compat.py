@@ -86,7 +86,7 @@ class OpenAICompatibleTextModel:
                     if not isinstance(content, str) or not content.strip():
                         raise ValueError("模型返回了空内容")
                     return content
-                except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                except httpx.TransportError as exc:
                     retryable = True
                     last_error = exc
                 except httpx.HTTPStatusError as exc:
@@ -96,7 +96,8 @@ class OpenAICompatibleTextModel:
                     )
                     last_error = exc
                 except (KeyError, IndexError, TypeError, ValueError) as exc:
-                    raise RuntimeError(f"文本模型返回格式错误: {exc}") from exc
+                    retryable = True
+                    last_error = RuntimeError(f"文本模型返回格式错误: {exc}")
                 if not retryable or attempt == attempts - 1:
                     break
                 await asyncio.sleep(settings.llm_retry_base_delay * (2**attempt))

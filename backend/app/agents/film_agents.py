@@ -171,10 +171,13 @@ async def prompt_storyboard(
         + "；光线 "
         + "、".join(bible.get("lighting_rules", []) or [])
     )
-    data = await _ask_json(
-        model, PROMPT_SYSTEM, "\n".join(blocks), ("prompt",)
-    )
-    return str(data.get("prompt", shot_desc))
+    assembled = "\n".join(blocks)
+    try:
+        data = await _ask_json(model, PROMPT_SYSTEM, assembled, ("prompt",))
+        return str(data.get("prompt", shot_desc))
+    except RuntimeError:
+        # A single provider-side refusal must not abort the entire film.
+        return assembled
 
 
 async def select_storyboard(

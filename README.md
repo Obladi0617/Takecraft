@@ -159,7 +159,7 @@ npm run dev
 | `FILMAGENT_LLM_BACKEND` | `mock` | `mock` \| `openai`（任意 OpenAI 兼容端点） |
 | `FILMAGENT_LLM_API_KEY` | 空 | 文本模型 Key |
 | `FILMAGENT_LLM_BASE_URL` | `https://api-inference.modelscope.cn` | 文本模型端点 |
-| `FILMAGENT_LLM_MODEL` | `Qwen/Qwen3.5-35B-A3B` | 文本模型名 |
+| `FILMAGENT_LLM_MODEL` | `deepseek-ai/DeepSeek-V4-Pro` | 文本模型名；已通过魔搭端到端验收 |
 | `FILMAGENT_LLM_TIMEOUT` | `120` | 单次文本模型请求超时（秒） |
 | `FILMAGENT_LLM_MAX_RETRIES` | `3` | 网络错误、429、5xx 的最大尝试次数 |
 | `FILMAGENT_LLM_RETRY_BASE_DELAY` | `0.5` | 指数退避基础等待时间（秒） |

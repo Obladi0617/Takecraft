@@ -9,7 +9,7 @@ if not defined FILMAGENT_LLM_API_KEY (
 )
 
 if not defined FILMAGENT_LLM_BASE_URL set "FILMAGENT_LLM_BASE_URL=https://api-inference.modelscope.cn"
-if not defined FILMAGENT_LLM_MODEL set "FILMAGENT_LLM_MODEL=Qwen/Qwen3.5-35B-A3B"
+if not defined FILMAGENT_LLM_MODEL set "FILMAGENT_LLM_MODEL=deepseek-ai/DeepSeek-V4-Pro"
 set "FILMAGENT_LLM_BACKEND=openai"
 set "FILMAGENT_LLM_MAX_RETRIES=2"
 set "FILMAGENT_IMAGE_BACKEND=mock"
