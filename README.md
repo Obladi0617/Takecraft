@@ -213,6 +213,9 @@ FILMAGENT_VLM_BACKEND=mock
 OpenAI `POST /v1/chat/completions` 兼容格式，只需新增一个文本适配器，流水线
 和前端不需要改动。本地 H 盘 Ollama 保留为开发与断网兜底。
 
+Windows 已配置上述用户环境变量后，可双击 `Start-Takecraft-ModelScope.cmd`
+启动魔搭 API 模式。该脚本不会读取、打印或保存 Token 到仓库。
+
 
 ---
 
