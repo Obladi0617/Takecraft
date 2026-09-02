@@ -34,6 +34,30 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api-inference.modelscope.cn"
     llm_model: str = "Qwen/Qwen3.5-35B-A3B"
 
+    # 视觉理解模型（Reviewer 真实看片；openai 兼容端点皆可，抽帧走 base64 image_url）
+    vlm_backend: str = "mock"  # mock | openai
+    vlm_api_key: str = ""
+    vlm_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode"
+    vlm_model: str = "qwen3-vl-plus"
+    vlm_max_tokens: int = 1200
+    vlm_timeout: float = 300.0
+    # vLLM 扩展参数，只给本地量化模型用（云端兼容端点会 400），0 表示不下发
+    vlm_repetition_penalty: float = 0.0
+
+    # AI Dailies 审核：闸门阈值来自 ffmpeg signalstats，命中即不调用视觉模型
+    review_concurrency: int = 2
+    review_frame_count: int = 8
+    review_max_width: int = 896
+    review_jpeg_quality: int = 4
+    review_keep_threshold: float = 75.0
+    review_reject_floor: float = 45.0
+    review_item_floor: int = 40
+    review_duration_tolerance: float = 0.2
+    review_black_ratio_max: float = 0.5
+    review_freeze_ratio_max: float = 0.9
+    review_compare: bool = True
+    review_compare_max_candidates: int = 3
+
     # 自动重抽上限（规格 §12）
     max_auto_retake_rounds: int = 2
 

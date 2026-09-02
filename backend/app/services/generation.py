@@ -96,6 +96,69 @@ def enqueue_video_jobs(
     return jobs
 
 
+def enqueue_review_jobs(
+    session: Session, project_id: str, targets: list[tuple[str, str]]
+) -> list[GenerationJob]:
+    """AI Dailies 审核任务（每条 Take 一个）。
+
+    走队列而不是在图节点里直接 await：审核要调视觉模型，必须有自己的并发闸，
+    否则一轮 12 条 Take 会同时打满云端 VLM 端点；顺带让审核在 Agent 动态里可见。
+    targets 为 [(shot_id, take_id)]。
+    """
+    return _enqueue_review_batch(
+        session,
+        project_id,
+        [
+            (shot_id, {"mode": "review", "shot_id": shot_id, "take_id": take_id})
+            for shot_id, take_id in targets
+        ],
+    )
+
+
+def enqueue_compare_jobs(
+    session: Session, project_id: str, shot_candidates: list[tuple[str, list[str]]]
+) -> list[GenerationJob]:
+    """同镜头内 KEEP Take 的两两比较任务（绝对分只判「能不能用」，谁进成片靠比较）。"""
+    return _enqueue_review_batch(
+        session,
+        project_id,
+        [
+            (
+                shot_id,
+                {"mode": "compare", "shot_id": shot_id, "candidates": candidates},
+            )
+            for shot_id, candidates in shot_candidates
+            if len(candidates) >= 2
+        ],
+    )
+
+
+def _enqueue_review_batch(
+    session: Session, project_id: str, items: list[tuple[str, dict]]
+) -> list[GenerationJob]:
+    jobs = []
+    for shot_id, payload in items:
+        index, job_id = next_seq_and_id(session, GenerationJob, project_id, "job")
+        job = GenerationJob(
+            id=job_id,
+            project_id=project_id,
+            shot_id=shot_id,
+            index=index,
+            job_type="REVIEW",
+            priority="HIGH",
+            payload=payload,
+        )
+        session.add(job)
+        jobs.append(job)
+    if not jobs:
+        return []
+    session.commit()
+    for job in jobs:
+        session.refresh(job)
+    generation_queue.notify()
+    return jobs
+
+
 def select_and_lock_storyboard(
     session: Session, project_id: str, shot: Shot, sb_id: str
 ) -> None:

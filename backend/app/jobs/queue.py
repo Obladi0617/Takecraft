@@ -28,12 +28,14 @@ class GenerationQueue:
         self._wakeup = asyncio.Event()
         self._running = False
         self._video_sem: asyncio.Semaphore | None = None
+        self._review_sem: asyncio.Semaphore | None = None
         self._poll_task: asyncio.Task | None = None
         self._inflight: set[str] = set()
 
     async def start(self) -> None:
         self._running = True
         self._video_sem = asyncio.Semaphore(settings.video_generation_concurrency)
+        self._review_sem = asyncio.Semaphore(settings.review_concurrency)
         self._poll_task = asyncio.create_task(self._poll_loop())
 
     async def stop(self) -> None:
@@ -97,9 +99,12 @@ class GenerationQueue:
     async def _run_job(
         self, project_id: str, job_id: str, job_type: str
     ) -> None:
+        # 只有会打外部重资源的任务类型才限并发：VIDEO 打生成端点，REVIEW 打视觉模型
+        semaphores = {"VIDEO": self._video_sem, "REVIEW": self._review_sem}
+        semaphore = semaphores.get(job_type)
         try:
-            if job_type == "VIDEO" and self._video_sem is not None:
-                async with self._video_sem:
+            if semaphore is not None:
+                async with semaphore:
                     await self._execute(project_id, job_id)
             else:
                 await self._execute(project_id, job_id)
@@ -124,6 +129,8 @@ class GenerationQueue:
                     }
                 elif job.job_type in ("CHARACTER", "LOCATION"):
                     job.result = await self._do_asset_images(session, job)
+                elif job.job_type == "REVIEW":
+                    job.result = await self._do_review(session, job)
                 else:
                     raise RuntimeError(f"不支持的 job_type: {job.job_type}")
                 job.status = "DONE"
@@ -334,6 +341,111 @@ class GenerationQueue:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(staged, dest)
         return {"take_id": take.id, "adapter_job_id": adapter_job_id}
+
+    async def _do_review(self, session: Session, job: GenerationJob) -> dict:
+        """AI Dailies：真实看片审核一条 Take。
+
+        顺序是刻意的——先 ffmpeg 测量与硬闸门，命中就直接判定，绝不为一条
+        时长不对或全黑的素材付一次视觉模型的钱。
+        """
+        from ..agents import get_video_understanding_model
+        from ..services.generation import record_artifact
+        from ..services.review import (
+            asset_anchors,
+            build_review,
+            make_request,
+            measure_and_sample,
+        )
+
+        payload = job.payload
+        if payload.get("mode") == "compare":
+            return await self._do_compare(session, job)
+
+        take = session.get(Take, payload["take_id"])
+        if take is None:
+            raise RuntimeError(f"Take 不存在: {payload['take_id']}")
+        shot = session.get(Shot, take.shot_id)
+        if shot is None:
+            raise RuntimeError(f"Shot 不存在: {take.shot_id}")
+
+        # ffprobe/ffmpeg 是子进程调用，必须丢到线程里，否则整条队列会被堵住
+        stats, failures, frames = await asyncio.to_thread(
+            measure_and_sample, job.project_id, take, max(shot.duration_target, 1.0)
+        )
+
+        insight = None
+        if not failures and frames:
+            characters, locations = asset_anchors(session, job.project_id, shot)
+            request = make_request(
+                shot, take, stats, frames, characters, locations
+            )
+            insight = await get_video_understanding_model().describe(request)
+
+        review = build_review(job.project_id, take.id, insight, stats, failures, frames)
+        record_artifact(
+            session, job.project_id, "take_review", "reviewer", review, take.id
+        )
+        return {
+            "take_id": take.id,
+            "decision": review["decision"],
+            "score": review["score"],
+            "gates": [g["code"] for g in review["gates"]],
+            "frame_count": len(frames),
+            "vlm_called": insight is not None,
+        }
+
+    async def _do_compare(self, session: Session, job: GenerationJob) -> dict:
+        """同镜头内已通过初筛的 Take 打擂台：绝对分判可用性，比较判谁进成片。"""
+        from ..agents import get_video_understanding_model
+        from ..services.generation import record_artifact
+        from ..services.review import compare_payload, frames_for_compare
+
+        payload = job.payload
+        shot = session.get(Shot, payload["shot_id"])
+        if shot is None:
+            raise RuntimeError(f"Shot 不存在: {payload['shot_id']}")
+        takes = [
+            take
+            for take in (
+                session.get(Take, tid) for tid in (payload.get("candidates") or [])
+            )
+            if take is not None
+        ]
+        if len(takes) < 2:
+            raise RuntimeError(f"比较候选不足: {[t.id for t in takes]}")
+
+        model = get_video_understanding_model()
+        groups = [
+            await asyncio.to_thread(
+                frames_for_compare, job.project_id, take, max(shot.duration_target, 1.0)
+            )
+            for take in takes
+        ]
+        champion, champion_frames = takes[0], groups[0]
+        rounds: list[dict] = []
+        for challenger, challenger_frames in zip(takes[1:], groups[1:], strict=False):
+            verdict = await model.compare(
+                shot.title, champion.prompt or shot.description, champion_frames, challenger_frames
+            )
+            rounds.append(
+                {
+                    "a": champion.id,
+                    "b": challenger.id,
+                    "winner": verdict.winner,
+                    "reason": verdict.reason,
+                    "confidence": verdict.confidence,
+                }
+            )
+            if verdict.winner == "B":
+                champion, champion_frames = challenger, challenger_frames
+
+        data = compare_payload(
+            shot, champion.id, [t.id for t in takes], rounds, model.name
+        )
+        record_artifact(
+            session, job.project_id, "take_compare", "reviewer", data, shot.id
+        )
+        return {"shot_id": shot.id, "winner": champion.id, "rounds": len(rounds)}
 
 
 generation_queue = GenerationQueue()

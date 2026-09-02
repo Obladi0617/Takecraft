@@ -398,47 +398,73 @@ async def video_generation(state: ProductionState) -> dict:
 
 
 async def reviewing(state: ProductionState) -> dict:
-    """Reviewer 逐 Take 初筛；无 KEEP 的镜头触发自动重拍（≤ max_auto_retake_rounds 轮）。"""
+    """Reviewer 真实看片：审核入队 → 等待 → 同镜头 KEEP 打擂台 → 决定重拍。
+
+    审核不在图节点里直接调模型：视觉模型调用需要限并发、可重试、在前端可见，
+    这三件事统一队列已经有了（规格书第 23 节）。
+    """
     project_id = state["project_id"]
-    model = get_text_model()
     rounds = dict(state.get("retake_rounds", {}))
     needs_retake: list[str] = []
     blocked_notes: list[str] = []
 
     with _session(project_id) as session:
-        reviews: dict[str, dict] = {
-            a.subject_id: a.data
-            for a in session.exec(
-                select(AgentArtifact).where(
-                    AgentArtifact.project_id == project_id,
-                    AgentArtifact.kind == "take_review",
-                )
-            )
-            if a.subject_id
-        }
-        shots = _shots_of_project(session, project_id)
-        for shot in shots:
-            takes = takes_of_shot(session, project_id, shot.id)
-            for take in takes:
-                if take.id in reviews:
-                    continue
-                review = await review_take(model, shot.title, take.prompt, take.id)
-                reviews[take.id] = review
-                record_artifact(
-                    session, project_id, "take_review", "reviewer", review, take.id
-                )
+        reviewed = set(_take_reviews(session, project_id))
+        targets = [
+            (shot.id, take.id)
+            for shot in _shots_of_project(session, project_id)
+            for take in takes_of_shot(session, project_id, shot.id)
+            if take.id not in reviewed
+        ]
+        job_ids = [j.id for j in enqueue_review_jobs(session, project_id, targets)]
 
-        for shot in shots:
+    statuses = await wait_for_jobs(project_id, job_ids) if job_ids else {}
+    review_failed = [job_id for job_id, s in statuses.items() if s != "DONE"]
+    if review_failed:
+        blocked_notes.append(
+            f"{len(review_failed)} 条审核任务失败（视觉模型或抽帧不可用），相应 Take 按未过审处理"
+        )
+
+    compare_ids: list[str] = []
+    with _session(project_id) as session:
+        if settings.review_compare:
+            reviews = _take_reviews(session, project_id)
+            compare_targets: list[tuple[str, list[str]]] = []
+            for shot in _shots_of_project(session, project_id):
+                ranked = rank_takes(
+                    {
+                        take.id: reviews[take.id]
+                        for take in takes_of_shot(session, project_id, shot.id)
+                        if take.id in reviews
+                    }
+                )
+                if len(ranked) >= 2:
+                    compare_targets.append(
+                        (
+                            shot.id,
+                            [
+                                take_id
+                                for take_id, _ in ranked[
+                                    : settings.review_compare_max_candidates
+                                ]
+                            ],
+                        )
+                    )
+            compare_ids = [
+                j.id for j in enqueue_compare_jobs(session, project_id, compare_targets)
+            ]
+
+    if compare_ids:
+        await wait_for_jobs(project_id, compare_ids)
+
+    with _session(project_id) as session:
+        reviews = _take_reviews(session, project_id)
+        for shot in _shots_of_project(session, project_id):
             takes = takes_of_shot(session, project_id, shot.id)
             if not takes:
                 needs_retake.append(shot.id)
                 continue
-            keep = [
-                t
-                for t in takes
-                if reviews.get(t.id, {}).get("decision") == "KEEP"
-            ]
-            if keep:
+            if any(reviews.get(t.id, {}).get("decision") == "KEEP" for t in takes):
                 continue
             used = rounds.get(shot.id, 0)
             if used < settings.max_auto_retake_rounds:
@@ -449,12 +475,13 @@ async def reviewing(state: ProductionState) -> dict:
                     f"镜头「{shot.title}」重拍 {used} 轮仍无 KEEP，按最高分兜底选片"
                 )
 
+    summary = f"{len(job_ids)} 条送审 / {len(compare_ids)} 组比较"
     update = _stage_update(
         project_id,
         "TAKE_SELECTION",
-        f"审核完成，{len(needs_retake)} 个镜头待重拍"
+        f"审核完成（{summary}），{len(needs_retake)} 个镜头待重拍"
         if needs_retake
-        else "全部镜头通过审核",
+        else f"全部镜头通过审核（{summary}）",
     )
     return {
         **update,
