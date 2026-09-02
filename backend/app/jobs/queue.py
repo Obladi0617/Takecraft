@@ -2,11 +2,12 @@ import asyncio
 import shutil
 from pathlib import Path
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from ..config import settings
 from ..db import abs_path, get_engine, project_path
-from ..domain import GenerationJob, Shot, Storyboard, Take
+from ..domain import Character, GenerationJob, Location, Shot, Storyboard, Take
 from ..generators import get_image_generator, get_video_generator
 from ..generators.base import ImageGenerationRequest, VideoGenerationRequest
 from ..media.ffmpeg import make_proxy, probe_duration
@@ -16,6 +17,8 @@ PRIORITY_RANK = {"CRITICAL": 0, "HIGH": 1, "NORMAL": 2, "LOW": 3}
 POLL_INTERVAL = 2.0
 ADAPTER_POLL_INTERVAL = 0.5
 MAX_RETRY = 1
+# max(index)+1 在并发下会撞主键，撞了就重算
+ID_ATTEMPTS = 3
 
 
 class GenerationQueue:
@@ -119,15 +122,26 @@ class GenerationQueue:
                         **job.result,
                         **await self._do_video(session, job),
                     }
+                elif job.job_type in ("CHARACTER", "LOCATION"):
+                    job.result = await self._do_asset_images(session, job)
                 else:
                     raise RuntimeError(f"不支持的 job_type: {job.job_type}")
                 job.status = "DONE"
             except asyncio.CancelledError:
+                session.rollback()
+                job = session.get(GenerationJob, job_id)
+                if job is None:
+                    raise
                 job.status = "CANCELLED"
                 session.add(job)
                 session.commit()
                 raise
             except Exception as e:  # noqa: BLE001
+                # 必须先回滚：失败的 flush 会让同一 Session 的后续写入全部报 PendingRollbackError
+                session.rollback()
+                job = session.get(GenerationJob, job_id)
+                if job is None:
+                    return
                 if job.retry_count < MAX_RETRY:
                     job.retry_count += 1
                     job.status = "PENDING"
@@ -148,32 +162,99 @@ class GenerationQueue:
             count=max(int(payload.get("count", 4)), 1),
             width=int(payload.get("width", 1024)),
             height=int(payload.get("height", 576)),
+            references=[r for r in payload.get("references") or []],
         )
         images = await get_image_generator(job.project_id).generate(request)
-        ids = []
         root = project_path(job.project_id)
-        for image in images:
-            index, sb_id = next_seq_and_id(session, Storyboard, job.project_id, "sb")
-            rel = str(Path(image.path).resolve().relative_to(root))
-            session.add(
-                Storyboard(
-                    id=sb_id,
-                    project_id=job.project_id,
-                    shot_id=shot.id,
-                    index=index,
-                    prompt=prompt,
-                    width=image.width,
-                    height=image.height,
-                    image_path=rel,
-                    model=image.model,
-                    seed=image.seed,
+        ids: list[str] = []
+        for _ in range(ID_ATTEMPTS):
+            ids = []
+            for image in images:
+                index, sb_id = next_seq_and_id(session, Storyboard, job.project_id, "sb")
+                rel = str(Path(image.path).resolve().relative_to(root))
+                session.add(
+                    Storyboard(
+                        id=sb_id,
+                        project_id=job.project_id,
+                        shot_id=shot.id,
+                        index=index,
+                        prompt=prompt,
+                        width=image.width,
+                        height=image.height,
+                        image_path=rel,
+                        model=image.model,
+                        seed=image.seed,
+                    )
                 )
-            )
-            ids.append(sb_id)
-        session.commit()
+                ids.append(sb_id)
+            try:
+                session.commit()
+                break
+            except IntegrityError:
+                session.rollback()
+        else:
+            raise RuntimeError("分镜 id 分配连续冲突")
         return {"storyboard_ids": ids}
 
+    async def _do_asset_images(self, session: Session, job: GenerationJob) -> dict:
+        """角色三视图 / 场景参考图（规格书第 13.2、14 节）。"""
+        from ..services.assets import (
+            CHARACTER_ASSET_TYPE,
+            CHARACTER_SUBDIR,
+            LOCATION_ASSET_TYPE,
+            LOCATION_SUBDIR,
+            store_generated_asset,
+            view_prompt,
+        )
+
+        payload = job.payload
+        owner_id = payload["owner_id"]
+        views = list(payload.get("views") or [])
+        is_character = job.job_type == "CHARACTER"
+        owner = session.get(Character if is_character else Location, owner_id)
+        if owner is None:
+            raise RuntimeError(f"资产不存在: {owner_id}")
+        base_prompt = payload.get("prompt") or owner.description or owner.name
+        subdir = CHARACTER_SUBDIR if is_character else LOCATION_SUBDIR
+        asset_type = CHARACTER_ASSET_TYPE if is_character else LOCATION_ASSET_TYPE
+        generator = get_image_generator(job.project_id, subdir)
+
+        asset_ids: list[str] = []
+        generated_views: list[str] = []
+        for view in views:
+            request = ImageGenerationRequest(
+                prompt=view_prompt(base_prompt, view),
+                count=1,
+                width=int(payload.get("width", 1024)),
+                height=int(payload.get("height", 576)),
+                seed=owner.seed,
+            )
+            images = await generator.generate(request)
+            if not images:
+                raise RuntimeError(f"{view} 未产出图像")
+            image = images[0]
+            asset = store_generated_asset(
+                session,
+                job.project_id,
+                owner_id,
+                asset_type,
+                view,
+                image.path,
+                image.model,
+                image.seed,
+            )
+            asset_ids.append(asset.id)
+            generated_views.append(view)
+
+        if owner.status == "DRAFT":
+            owner.status = "PENDING_CONFIRM"
+            session.add(owner)
+        session.commit()
+        return {"asset_ids": asset_ids, "views": generated_views}
+
     async def _do_video(self, session: Session, job: GenerationJob) -> dict:
+        from ..services.assets import shot_asset_blocks
+
         payload = job.payload
         shot = session.get(Shot, payload["shot_id"])
         if shot is None:
@@ -184,12 +265,16 @@ class GenerationQueue:
             sb = session.get(Storyboard, shot.storyboard_id)
             if sb is not None:
                 first_frame = str(abs_path(job.project_id, sb.image_path))
+        asset_refs = shot_asset_blocks(session, job.project_id, shot)["reference_images"]
+        reference_images = ([first_frame] if first_frame else []) + [
+            ref for ref in asset_refs if ref != first_frame
+        ]
         request = VideoGenerationRequest(
             shot_id=shot.id,
             prompt=prompt,
             duration=max(shot.duration_target, 1.0),
             first_frame=first_frame,
-            reference_images=[first_frame] if first_frame else [],
+            reference_images=reference_images,
         )
         generator = get_video_generator(job.project_id)
         adapter_job_id = await generator.submit(request)
@@ -206,15 +291,20 @@ class GenerationQueue:
             await asyncio.sleep(ADAPTER_POLL_INTERVAL)
 
         video = await generator.result(adapter_job_id)
-        index, take_id = next_seq_and_id(session, Take, job.project_id, "take")
-        rel = f"takes/{shot.id}/{take_id}.mp4"
-        dest = abs_path(job.project_id, rel)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(video.path, dest)
-        proxy_rel = f"proxies/{take_id}.mp4"
-        proxy = make_proxy(dest, abs_path(job.project_id, proxy_rel))
-        session.add(
-            Take(
+        # 先落到 job 专属暂存名：id 冲突重试时才不会覆盖别的 Take 已成片的文件
+        staged = abs_path(job.project_id, f"takes/_staging/{job.id}.mp4")
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(video.path, staged)
+        duration = probe_duration(staged) or video.duration
+
+        rel = proxy_rel = ""
+        take: Take | None = None
+        for _ in range(ID_ATTEMPTS):
+            index, take_id = next_seq_and_id(session, Take, job.project_id, "take")
+            rel = f"takes/{shot.id}/{take_id}.mp4"
+            proxy_rel = f"proxies/{take_id}.mp4"
+            proxy = make_proxy(staged, abs_path(job.project_id, proxy_rel))
+            take = Take(
                 id=take_id,
                 project_id=job.project_id,
                 shot_id=shot.id,
@@ -225,11 +315,23 @@ class GenerationQueue:
                 seed=video.seed,
                 original_path=rel,
                 proxy_path=proxy_rel if proxy is not None else None,
-                duration=probe_duration(dest) or video.duration,
+                duration=duration,
             )
-        )
-        session.commit()
-        return {"take_id": take_id, "adapter_job_id": adapter_job_id}
+            session.add(take)
+            try:
+                session.commit()
+                break
+            except IntegrityError:
+                session.rollback()
+                abs_path(job.project_id, proxy_rel).unlink(missing_ok=True)
+                take = None
+        if take is None:
+            raise RuntimeError("take id 分配连续冲突")
+
+        dest = abs_path(job.project_id, rel)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(staged, dest)
+        return {"take_id": take.id, "adapter_job_id": adapter_job_id}
 
 
 generation_queue = GenerationQueue()

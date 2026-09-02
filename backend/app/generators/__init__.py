@@ -5,12 +5,13 @@ from .cloud import ModelScopeImageGenerator, ModelScopeVideoGenerator, MiniMaxVi
 from .mock import MockImageGenerator, MockVideoGenerator
 
 
-def get_image_generator(project_id: str) -> ImageGenerator:
+def get_image_generator(project_id: str, subdir: str = "storyboards") -> ImageGenerator:
     backend = settings.image_backend
+    workdir = project_path(project_id) / subdir
     if backend == "mock":
-        return MockImageGenerator(project_path(project_id) / "storyboards")
+        return MockImageGenerator(workdir)
     if backend == "modelscope":
-        return ModelScopeImageGenerator(project_path(project_id) / "storyboards")
+        return ModelScopeImageGenerator(workdir)
     raise ValueError(f"未知图像后端: {backend}")
 
 

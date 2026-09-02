@@ -1,3 +1,19 @@
+from .assets import (
+    character_design_prompt,
+    create_assets_from_cards,
+    enqueue_asset_job,
+    enqueue_character_turnaround,
+    enqueue_location_refs,
+    link_shots_to_assets,
+    location_design_prompt,
+    lock_character,
+    lock_location,
+    refs_of,
+    shot_asset_blocks,
+    stable_seed,
+    store_generated_asset,
+    store_uploaded_asset,
+)
 from .generation import (
     enqueue_storyboard_job,
     enqueue_video_jobs,
@@ -8,10 +24,24 @@ from .generation import (
 )
 
 __all__ = [
+    "character_design_prompt",
+    "create_assets_from_cards",
+    "enqueue_asset_job",
+    "enqueue_character_turnaround",
+    "enqueue_location_refs",
     "enqueue_storyboard_job",
     "enqueue_video_jobs",
+    "link_shots_to_assets",
+    "location_design_prompt",
+    "lock_character",
+    "lock_location",
     "record_artifact",
+    "refs_of",
     "select_and_lock_storyboard",
+    "shot_asset_blocks",
+    "stable_seed",
+    "store_generated_asset",
+    "store_uploaded_asset",
     "takes_of_shot",
     "wait_for_jobs",
 ]

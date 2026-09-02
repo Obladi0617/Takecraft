@@ -1,5 +1,6 @@
 import asyncio
 import colorsys
+import hashlib
 import subprocess
 import uuid
 from pathlib import Path
@@ -24,6 +25,10 @@ def _run(cmd: list[str]) -> None:
         raise RuntimeError(f"ffmpeg 失败: {result.stderr[-300:]}")
 
 
+def _prompt_offset(prompt: str) -> int:
+    return int(hashlib.md5(prompt.encode()).hexdigest()[:6], 16) % 997
+
+
 class MockImageGenerator:
     """无 GPU 环境的本地图像后端：ffmpeg 渐变，按 seed 变化颜色与方向。"""
 
@@ -36,8 +41,14 @@ class MockImageGenerator:
         self.workdir.mkdir(parents=True, exist_ok=True)
         images: list[GeneratedImage] = []
         batch = uuid.uuid4().hex[:8]
+        base_seed = (
+            request.seed
+            if request.seed is not None
+            else uuid.uuid4().int % 100000
+        )
+        view_offset = _prompt_offset(request.prompt)
         for i in range(request.count):
-            seed = uuid.uuid4().int % 100000
+            seed = (base_seed + view_offset + i * 977) % 100000
             dst = self.workdir / f"img_{batch}_{i:02d}.png"
             colors = 2 + seed % 5
             params = [

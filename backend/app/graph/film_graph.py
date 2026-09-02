@@ -13,7 +13,9 @@ from sqlmodel import Session, select
 
 from ..agents import get_text_model
 from ..agents.film_agents import (
+    character_cards,
     director_bible,
+    location_cards,
     producer_plan,
     prompt_storyboard,
     review_take,
@@ -25,6 +27,8 @@ from ..config import settings
 from ..db import get_engine, write_project_json
 from ..domain import (
     AgentArtifact,
+    Character,
+    Location,
     Project,
     Scene,
     Shot,
@@ -34,6 +38,17 @@ from ..domain import (
 )
 from ..media.render import render_timeline
 from ..repositories import next_seq_and_id
+from ..services.assets import (
+    character_design_prompt,
+    create_assets_from_cards,
+    enqueue_character_turnaround,
+    enqueue_location_refs,
+    link_shots_to_assets,
+    location_design_prompt,
+    lock_character,
+    lock_location,
+    shot_asset_blocks,
+)
 from ..services.generation import (
     enqueue_storyboard_job,
     enqueue_video_jobs,
@@ -55,6 +70,8 @@ class ProductionState(TypedDict, total=False):
     stage: str
     scene_ids: list[str]
     shot_ids: list[str]
+    character_ids: list[str]
+    location_ids: list[str]
     retake_rounds: dict[str, int]
     needs_retake_shot_ids: list[str]
     blocked_reason: str
@@ -166,7 +183,7 @@ async def scripting(state: ProductionState) -> dict:
 
 
 async def asset_design(state: ProductionState) -> dict:
-    """Director 出导演圣经，Producer 出生产计划，并按计划定每镜 Take 数。"""
+    """Director 出导演圣经、Producer 出生产计划；角色设计师与美术指导建立并锁定资产。"""
     project_id, idea = state["project_id"], state["idea"]
     model = get_text_model()
     with _session(project_id) as session:
@@ -180,9 +197,99 @@ async def asset_design(state: ProductionState) -> dict:
             shot.take_count = take_count
             session.add(shot)
         session.commit()
-    return _stage_update(
-        project_id, "STORYBOARDING", f"导演圣经与生产计划就绪（每镜 {take_count} Take）"
+
+        # 规格书第 13/14 节：正式生产前建立角色与场景资产
+        char_cards = await character_cards(model, screenplay)
+        loc_cards = await location_cards(model, screenplay)
+        record_artifact(
+            session,
+            project_id,
+            "character_cards",
+            "character_designer",
+            {"characters": char_cards},
+        )
+        record_artifact(
+            session,
+            project_id,
+            "location_cards",
+            "art_director",
+            {"locations": loc_cards},
+        )
+        characters, locations = create_assets_from_cards(
+            session, project_id, char_cards, loc_cards
+        )
+        job_ids = [
+            enqueue_character_turnaround(
+                session, project_id, character, character_design_prompt(character)
+            ).id
+            for character in characters
+        ]
+        job_ids += [
+            enqueue_location_refs(
+                session, project_id, location, location_design_prompt(location)
+            ).id
+            for location in locations
+        ]
+        project = session.get(Project, project_id)
+        auto_confirm = (project.mode if project is not None else "AUTO") == "AUTO"
+
+    statuses = await wait_for_jobs(project_id, job_ids) if job_ids else {}
+    asset_failed = [jid for jid, s in statuses.items() if s != "DONE"]
+
+    with _session(project_id) as session:
+        locked_characters: list[str] = []
+        locked_locations: list[str] = []
+        all_characters = list(
+            session.exec(
+                select(Character)
+                .where(Character.project_id == project_id)
+                .order_by(Character.index)
+            )
+        )
+        all_locations = list(
+            session.exec(
+                select(Location)
+                .where(Location.project_id == project_id)
+                .order_by(Location.index)
+            )
+        )
+        if auto_confirm:
+            for character in all_characters:
+                if character.status != "LOCKED":
+                    lock_character(session, character)
+                locked_characters.append(character.name)
+            for location in all_locations:
+                if location.status != "LOCKED":
+                    lock_location(session, location)
+                locked_locations.append(location.name)
+        linked = link_shots_to_assets(session, project_id)
+        record_artifact(
+            session,
+            project_id,
+            "asset_lock",
+            "producer",
+            {
+                "auto_confirm": auto_confirm,
+                "characters": locked_characters,
+                "locations": locked_locations,
+                "shot_character_links": linked,
+                "failed_asset_jobs": asset_failed,
+            },
+        )
+        character_ids = [c.id for c in all_characters]
+        location_ids = [loc.id for loc in all_locations]
+
+    note = (
+        f"导演圣经与生产计划就绪（每镜 {take_count} Take）；"
+        f"角色 {len(locked_characters)} 个 / 场景 {len(locked_locations)} 个"
     )
+    if asset_failed:
+        note += f"，{len(asset_failed)} 个资产出图失败（仍以文本锚点约束一致性）"
+    return {
+        **_stage_update(project_id, "STORYBOARDING", note),
+        "character_ids": character_ids,
+        "location_ids": location_ids,
+    }
 
 
 async def storyboarding(state: ProductionState) -> dict:
@@ -195,12 +302,29 @@ async def storyboarding(state: ProductionState) -> dict:
         job_ids = []
         for shot in shots:
             scene = session.get(Scene, shot.scene_id) if shot.scene_id else None
+            assets = shot_asset_blocks(session, project_id, shot)
             prompt = await prompt_storyboard(
-                model, shot.description, scene.description if scene else "", bible
+                model,
+                {
+                    "title": shot.title,
+                    "description": shot.description,
+                    "framing": shot.framing,
+                    "camera_motion": shot.camera_motion,
+                    "duration_target": shot.duration_target,
+                },
+                scene.description if scene else "",
+                bible,
+                characters=assets["characters"],
+                location=assets["location"],
             )
             _compliance_guard(project_id, prompt, "pipeline.storyboard")
             job = enqueue_storyboard_job(
-                session, project_id, shot.id, prompt, count=STORYBOARD_CANDIDATES
+                session,
+                project_id,
+                shot.id,
+                prompt,
+                count=STORYBOARD_CANDIDATES,
+                references=assets["reference_images"],
             )
             job_ids.append(job.id)
 

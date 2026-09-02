@@ -24,8 +24,30 @@ PLAN_SYSTEM = """你是制片人。基于剧本输出生产计划 JSON，结构�
 {"batch_strategy": "...", "default_take_count": 2, "shot_priorities": {"<镜头标题>": "CRITICAL|HIGH|NORMAL|LOW"}}
 default_take_count 取 1~4。中文。只输出 JSON。"""
 
-PROMPT_SYSTEM = """你是提示词工程师。把镜头描述与导演圣经融合成图像生成提示词，输出：
-{"prompt": "..."}（中文，120 字以内，包含画面主体、构图、光线、色调）。只输出 JSON。"""
+CHARACTER_SYSTEM = """你是角色设计师。从剧本中提取主要角色并输出角色卡 JSON，结构：
+{"characters": [{"name": "...", "gender": "男|女|其他", "age_range": "...", "role": "PRIMARY|SUPPORTING",
+"description": "...", "appearance": "...", "costume": "...", "personality": "...",
+"visual_anchors": ["...", "..."], "immutable_traits": ["...", "..."]}]}
+要求：最多 3 个主要角色，其中至少 1 个 role=PRIMARY；appearance 与 costume 必须是可直接用于图像生成的
+具体视觉描述（发型发色、体型、服装颜色与材质）；visual_anchors 是 3~5 条原子化视觉锚点
+（例：黑色短发、左眉尾疤痕、深灰色连帽外套），短词组优于长句；immutable_traits 为跨镜头不可变的
+识别锚点 2~4 条；严格区分不同角色的特征，不得把 A 角色的服装或外貌分配给 B 角色；中文。只输出 JSON。"""
+
+LOCATION_SYSTEM = """你是美术指导。从剧本中提取主要场景并输出场景资产 JSON，结构：
+{"locations": [{"name": "...", "scene_title": "<剧本中对应的场景标题>", "description": "...",
+"visual_style": "...", "time_of_day_default": "清晨|白天|黄昏|夜晚",
+"materials": ["..."], "colors": ["..."], "visual_cues": ["..."],
+"immutable_elements": ["..."], "lighting_rules": ["..."]}]}
+要求：最多 3 个主要场景；scene_title 必须与剧本里的场景标题一致；colors 用具体色名；
+visual_cues 是 2~4 条具体可视锚点（例：红色招牌、绿色长椅）；immutable_elements 为跨镜头必须
+保持一致的固定元素 2~4 条；中文。只输出 JSON。"""
+
+PROMPT_SYSTEM = """你是提示词工程师。把镜头描述、已锁定的角色/场景资产与导演圣经融合成图像生成提示词，输出：
+{"prompt": "..."}（中文，400 字以内，包含画面主体、构图、光线、色调）。
+硬性要求：
+1. 角色「不可变特征」与场景「固定元素」必须原样出现在提示词中，不得改写、翻译或省略；
+2. 字数超限时只能压缩【剧情场景】与【镜头】里的动作描述，锚点段落永不删减；
+3. 保留输入的分节顺序（风格→角色→场景→镜头→导演圣经）与各分节标题。只输出 JSON。"""
 
 SELECT_SB_SYSTEM = """你是导演。从分镜候选中选出最符合导演意图的一张，输出：
 {"storyboard_id": "<候选id>"}。只输出 JSON。"""
@@ -69,14 +91,58 @@ async def producer_plan(model: TextModel, idea: str, screenplay: dict) -> dict:
     )
 
 
-async def prompt_storyboard(
-    model: TextModel, shot_desc: str, scene_desc: str, bible: dict
-) -> str:
+async def character_cards(model: TextModel, screenplay: dict) -> list[dict]:
     data = await _ask_json(
         model,
-        PROMPT_SYSTEM,
-        f"镜头：{shot_desc}\n场景：{scene_desc}\n导演圣经：{json.dumps(bible, ensure_ascii=False)}",
+        CHARACTER_SYSTEM,
+        f"剧本：{json.dumps(screenplay, ensure_ascii=False)}",
     )
+    cards = data.get("characters")
+    return [c for c in cards if isinstance(c, dict)] if isinstance(cards, list) else []
+
+
+async def location_cards(model: TextModel, screenplay: dict) -> list[dict]:
+    data = await _ask_json(
+        model,
+        LOCATION_SYSTEM,
+        f"剧本：{json.dumps(screenplay, ensure_ascii=False)}",
+    )
+    cards = data.get("locations")
+    return [c for c in cards if isinstance(c, dict)] if isinstance(cards, list) else []
+
+
+async def prompt_storyboard(
+    model: TextModel,
+    shot_spec: dict,
+    scene_desc: str,
+    bible: dict,
+    characters: list[str] | None = None,
+    location: str = "",
+) -> str:
+    """组装顺序（风格→角色→场景→镜头→导演圣经）来自真实项目模板，不可随意调整。"""
+    shot_desc = str(shot_spec.get("description") or shot_spec.get("title") or "")
+    blocks = [f"【风格】{bible.get('visual_style', '')}"]
+    if characters:
+        blocks.append(
+            "【角色】以下锚点逐字保留，不得改写：\n" + "\n".join(f"- {c}" for c in characters)
+        )
+    if location:
+        blocks.append(f"【场景】{location}")
+    if scene_desc:
+        blocks.append(f"【剧情场景】{scene_desc}")
+    blocks.append(
+        "【镜头】"
+        + f"{shot_desc}；景别 {shot_spec.get('framing', 'MEDIUM')}"
+        + f"；运镜 {shot_spec.get('camera_motion', 'STATIC')}"
+        + f"；时长 {shot_spec.get('duration_target', 3.0)}s"
+    )
+    blocks.append(
+        "【导演圣经】色调 "
+        + "、".join(bible.get("color_rules", []) or [])
+        + "；光线 "
+        + "、".join(bible.get("lighting_rules", []) or [])
+    )
+    data = await _ask_json(model, PROMPT_SYSTEM, "\n".join(blocks))
     return str(data.get("prompt", shot_desc))
 
 

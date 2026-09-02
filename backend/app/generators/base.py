@@ -11,6 +11,7 @@ class ImageGenerationRequest(BaseModel):
     width: int = 1024
     height: int = 576
     count: int = 4
+    seed: int | None = None
 
 
 class GeneratedImage(BaseModel):

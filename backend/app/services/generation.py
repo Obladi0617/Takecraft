@@ -44,6 +44,7 @@ def enqueue_storyboard_job(
     count: int = 4,
     width: int = 1024,
     height: int = 576,
+    references: list[str] | None = None,
 ) -> GenerationJob:
     index, job_id = next_seq_and_id(session, GenerationJob, project_id, "job")
     job = GenerationJob(
@@ -58,6 +59,7 @@ def enqueue_storyboard_job(
             "count": max(count, 1),
             "width": width,
             "height": height,
+            "references": list(references or []),
         },
     )
     session.add(job)
