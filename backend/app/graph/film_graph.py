@@ -366,12 +366,15 @@ async def storyboarding(state: ProductionState) -> dict:
             )
             if not candidates:
                 continue
-            sb_id = await select_storyboard(
-                model,
-                shot.title,
-                bible,
-                [{"id": c.id, "prompt": c.prompt} for c in candidates],
-            )
+            if settings.image_backend == "mock":
+                sb_id = candidates[0].id
+            else:
+                sb_id = await select_storyboard(
+                    model,
+                    shot.title,
+                    bible,
+                    [{"id": c.id, "prompt": c.prompt} for c in candidates],
+                )
             select_and_lock_storyboard(session, project_id, shot, sb_id)
     return _stage_update(project_id, "VIDEO_GENERATION", "分镜已锁定")
 
