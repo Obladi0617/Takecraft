@@ -75,6 +75,27 @@ export interface Timeline {
   duration: number
 }
 
+export interface PipelineJob {
+  id: string
+  job_type: string
+  status: string
+  payload: Record<string, unknown>
+  result: Record<string, unknown> | null
+  error: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface PipelineStageNote {
+  stage: string
+  note?: string
+}
+
+export interface PipelineResponse {
+  job: PipelineJob | null
+  stages: PipelineStageNote[]
+}
+
 export interface Storyboard {
   id: string
   project_id: string

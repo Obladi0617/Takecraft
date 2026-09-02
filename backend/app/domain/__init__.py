@@ -1,3 +1,4 @@
+from .agent_artifact import AgentArtifact
 from .asset import Asset
 from .generation_job import GenerationJob
 from .project import Project
@@ -8,6 +9,7 @@ from .take import Take
 from .timeline import TimelineClip
 
 __all__ = [
+    "AgentArtifact",
     "Asset",
     "GenerationJob",
     "Project",

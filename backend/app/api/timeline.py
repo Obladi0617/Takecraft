@@ -5,6 +5,7 @@ from sqlmodel import Session, select
 
 from ..db import project_session
 from ..domain import Shot, Take, TimelineClip
+from ..services.timeline import auto_edit_timeline
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["timeline"])
 
@@ -74,29 +75,7 @@ def get_timeline(project_id: str, session: Session = Depends(project_session)):
 
 @router.post("/timeline/auto-edit")
 def auto_edit(project_id: str, session: Session = Depends(project_session)):
-    stmt = select(Shot).where(Shot.project_id == project_id).order_by(Shot.index)
-    shots = [s for s in session.exec(stmt) if s.selected_take_id]
-
-    session.exec(delete(TimelineClip).where(TimelineClip.project_id == project_id))
-    start = 0.0
-    index = 0
-    for shot in shots:
-        take = session.get(Take, shot.selected_take_id)  # type: ignore[arg-type]
-        duration = take.duration if take and take.duration else shot.duration_target
-        clip = TimelineClip(
-            id=f"clip_{index + 1:03d}",
-            project_id=project_id,
-            index=index,
-            shot_id=shot.id,
-            take_id=shot.selected_take_id,
-            timeline_start=start,
-            source_in=0.0,
-            source_out=duration,
-        )
-        session.add(clip)
-        start += duration
-        index += 1
-    session.commit()
+    auto_edit_timeline(project_id, session)
     return _timeline_response(project_id, session)
 
 

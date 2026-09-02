@@ -106,14 +106,32 @@ FILMAGENT_MODELSCOPE_API_KEY=...     # ModelScope API-Inference
 
 ### 合规节点
 
-生成链路的三个入口（生成分镜、生成 Take、成片渲染出口）均有前置审核：规则式 Prompt 闸门 + 项目级审计日志（`data/projects/{id}/logs/compliance.jsonl`），命中受限内容即阻断并给出分类原因；阶段 3 的 Reviewer Agent 将在同一闸门上扩展 AI 审核。
+生成链路的三个入口（生成分镜、生成 Take、成片渲染出口）均有前置审核：规则式 Prompt 闸门 + 项目级审计日志（`data/projects/{id}/logs/compliance.jsonl`），命中受限内容即阻断并给出分类原因。一句话全自动流程中，Reviewer Agent 在同一闸门之后对每个 Take 做 AI 初筛评分，未过审镜头自动重拍（最多 `max_auto_retake_rounds` 轮，默认 2），仍不过则按最高分兜底选片并记录兜底原因供人工复核。
+
+## 快速开始
+
+```bash
+# 后端（端口 8765）
+cd backend
+python -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/uvicorn app.main:app --port 8765
+
+# 前端（端口 5173）
+cd frontend
+npm install
+npm run dev
+```
+
+打开 `http://localhost:5173`，在「一句话生成短片」输入创意并点击启动，即可全自动完成：剧本 → 导演圣经 → 分镜候选 → Take 生成 → 审核（自动重拍）→ 选片 → 剪辑 → 成片渲染。右侧「一句话全自动流程」面板实时显示各阶段进度。
+
+默认使用 Mock 文本模型与 Mock 生成后端（无需任何 API Key / GPU）。切换真实后端见「云本地协同」。
 
 ## 路线图
 
 - [x] **阶段 0**：系统设计与规格（[项目概述.md](项目概述.md)）
 - [x] **阶段 1**：底层生产链（无 AI）——Project → Shot → 上传 / 添加 Take → 选片 → Timeline → 实时 Preview → FFmpeg 渲染
 - [x] **阶段 2**：ImageGenerator / VideoGenerator Adapter、Storyboard（候选 / 选定 / 锁定）、统一生成队列、Mock + 云 API 后端
-- [ ] **阶段 3**：LangGraph + 全部 6 个 Agent 的完整生产工作流
+- [x] **阶段 3**：LangGraph 主流程 + 全部 6 个 Agent——一句话创意全自动生产（剧本 → 分镜 → Take 生成 → 审核重拍 → 选片 → 剪辑 → 成片）
 
 > 实施原则（规格书第 70 节）：先保证 `Shot → Take → Select → Timeline → Preview` 底层生产链路成立，再让 Agent 接入这条链路，而非先做复杂 Agent。
 

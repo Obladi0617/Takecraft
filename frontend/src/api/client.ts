@@ -1,5 +1,6 @@
 import type {
   GenerationJob,
+  PipelineResponse,
   Project,
   Scene,
   Shot,
@@ -37,8 +38,22 @@ export const fetchProjects = () => api<Project[]>('/api/v1/projects')
 export const fetchProject = (pid: string) =>
   api<Project>(`/api/v1/projects/${pid}`)
 
-export const createProject = (body: { name: string; idea?: string }) =>
+export const createProject = (body: {
+  name: string
+  idea?: string
+  mode?: string
+  default_take_count?: number
+}) =>
   api<Project>('/api/v1/projects', { method: 'POST', body: JSON.stringify(body) })
+
+export const startOneSentence = (pid: string) =>
+  api<{ job: { id: string; status: string }; message: string }>(
+    `/api/v1/projects/${pid}/one-sentence`,
+    { method: 'POST' },
+  )
+
+export const fetchPipeline = (pid: string) =>
+  api<PipelineResponse>(`/api/v1/projects/${pid}/pipeline`)
 
 export const deleteProject = (pid: string) =>
   api<void>(`/api/v1/projects/${pid}`, { method: 'DELETE' })

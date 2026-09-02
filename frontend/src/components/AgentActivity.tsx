@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { fetchGenerationJobs } from '../api/client'
 import { useAppStore } from '../stores/app'
+import PipelinePanel from './PipelinePanel'
 
 const STATUS_LABEL: Record<string, string> = {
   PENDING: '排队中',
@@ -17,6 +18,7 @@ const JOB_TYPE_LABEL: Record<string, string> = {
   VIDEO: 'Take',
   CHARACTER: '角色',
   LOCATION: '场景',
+  PIPELINE: '全流程',
 }
 
 export default function AgentActivity() {
@@ -34,6 +36,7 @@ export default function AgentActivity() {
 
   return (
     <div className="agent-activity">
+      <PipelinePanel />
       <div className="navigator-heading">
         Agent 动态
         {active.length > 0 && (
@@ -64,8 +67,8 @@ export default function AgentActivity() {
         ))}
       </div>
       <p className="muted agent-note">
-        多 Agent 编排（Producer / Writer / Director / Prompt / Reviewer /
-        Editor）将在阶段 3 接入 LangGraph。
+        Producer / Writer / Director / Prompt / Reviewer / Editor 六个 Agent
+        已由 LangGraph 主流程编排，可在「一句话生成」中全自动运行。
       </p>
     </div>
   )

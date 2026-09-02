@@ -28,6 +28,15 @@ class Settings(BaseSettings):
     modelscope_image_model: str = "Qwen/Qwen-Image"
     modelscope_video_model: str = "Wan-AI/Wan2.2-T2V-Fast"
 
+    # 文本模型（Agent 大脑；openai 兼容端点皆可）
+    llm_backend: str = "mock"  # mock | openai
+    llm_api_key: str = ""
+    llm_base_url: str = "https://api-inference.modelscope.cn"
+    llm_model: str = "Qwen/Qwen3.5-35B-A3B"
+
+    # 自动重抽上限（规格 §12）
+    max_auto_retake_rounds: int = 2
+
     model_config = {"env_prefix": "FILMAGENT_"}
 
 

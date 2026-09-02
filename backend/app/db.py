@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Iterator
 
 from fastapi import HTTPException
+from sqlalchemy import event
 from sqlmodel import Session, SQLModel, create_engine
 
 from . import domain  # noqa: F401  导入以注册全部表
@@ -50,14 +51,26 @@ def require_project(project_id: str) -> None:
 
 
 def _make_engine(project_id: str):
-    return create_engine(
+    engine = create_engine(
         f"sqlite:///{project_db(project_id)}",
-        connect_args={"check_same_thread": False},
+        connect_args={"check_same_thread": False, "timeout": 30},
     )
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, _record):  # noqa: ANN001
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    return engine
 
 
 def init_project_db(project_id: str):
-    engine = get_engine(project_id)
+    # 新项目：先建库再缓存 engine（get_engine 会先做 require_project 存在性检查）
+    engine = _make_engine(project_id)
+    SQLModel.metadata.create_all(engine)
     _engines[project_id] = engine
     return engine
 

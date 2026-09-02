@@ -5,8 +5,8 @@ from sqlmodel import Field, SQLModel
 
 from .base import utcnow
 
-# 规格书第 23 节
-JOB_TYPES = ["CHARACTER", "LOCATION", "STORYBOARD", "VIDEO"]
+# 规格书第 23 节；PIPELINE 为一句话全自动流程的编排任务
+JOB_TYPES = ["CHARACTER", "LOCATION", "STORYBOARD", "VIDEO", "PIPELINE"]
 JOB_STATUSES = [
     "PENDING",
     "RUNNING",
