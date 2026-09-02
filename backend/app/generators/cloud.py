@@ -97,6 +97,12 @@ class ModelScopeImageGenerator:
     async def generate(self, request: ImageGenerationRequest) -> list[GeneratedImage]:
         base = settings.modelscope_base_url.rstrip("/")
         model = settings.modelscope_image_model
+        if request.width > request.height:
+            size = "1664x928"
+        elif request.height > request.width:
+            size = "928x1664"
+        else:
+            size = "1328x1328"
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 f"{base}/v1/images/generations",
@@ -108,6 +114,7 @@ class ModelScopeImageGenerator:
                     "model": model,
                     "prompt": request.prompt,
                     "negative_prompt": request.negative_prompt or "",
+                    "size": size,
                 },
             )
             resp.raise_for_status()
@@ -202,6 +209,7 @@ class ModelScopeVideoGenerator(_CloudVideoBackend):
                     "model": model,
                     "prompt": request.prompt,
                     "negative_prompt": request.negative_prompt or "",
+                    "size": size,
                 },
             )
             resp.raise_for_status()

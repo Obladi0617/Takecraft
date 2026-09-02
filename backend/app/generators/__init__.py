@@ -2,7 +2,7 @@ from ..config import settings
 from ..db import project_path
 from .base import ImageGenerator, VideoGenerator
 from .cloud import ModelScopeImageGenerator, ModelScopeVideoGenerator, MiniMaxVideoGenerator
-from .mock import MockImageGenerator, MockVideoGenerator
+from .mock import ImageMotionVideoGenerator, MockImageGenerator, MockVideoGenerator
 
 
 def get_image_generator(project_id: str, subdir: str = "storyboards") -> ImageGenerator:
@@ -19,6 +19,8 @@ def get_video_generator(project_id: str) -> VideoGenerator:
     backend = settings.video_backend
     if backend == "mock":
         return MockVideoGenerator(project_path(project_id) / "takes" / "_generated")
+    if backend == "image_motion":
+        return ImageMotionVideoGenerator(project_path(project_id) / "takes" / "_generated")
     if backend == "minimax":
         return MiniMaxVideoGenerator(project_path(project_id) / "takes" / "_generated")
     if backend == "modelscope":

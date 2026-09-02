@@ -16,7 +16,7 @@ class Settings(BaseSettings):
         ]
     )
     image_backend: str = "mock"  # mock | modelscope
-    video_backend: str = "mock"  # mock | minimax | modelscope
+    video_backend: str = "mock"  # mock | image_motion | minimax | modelscope
     video_generation_concurrency: int = 1  # 规格书第 24 节
 
     # 云端 API（规格补丁：云本地协同；Key 缺失时相应后端不可用）

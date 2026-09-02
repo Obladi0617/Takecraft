@@ -366,7 +366,7 @@ async def storyboarding(state: ProductionState) -> dict:
             )
             if not candidates:
                 continue
-            if settings.image_backend == "mock":
+            if settings.image_backend == "mock" or len(candidates) == 1:
                 sb_id = candidates[0].id
             else:
                 sb_id = await select_storyboard(

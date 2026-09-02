@@ -171,3 +171,51 @@ class MockVideoGenerator:
         self._results.pop(job_id, None)
         self._errors.pop(job_id, None)
         self._cancelled.discard(job_id)
+
+
+class ImageMotionVideoGenerator(MockVideoGenerator):
+    """Turn a real storyboard frame into a subtle cinematic H.264 shot."""
+
+    name = "image-motion"
+
+    async def submit(self, request: VideoGenerationRequest) -> str:
+        job_id = f"motion_{uuid.uuid4().hex[:12]}"
+        task = asyncio.create_task(self._run_job(job_id, request))
+        self._tasks[job_id] = task
+        return job_id
+
+    async def _run_job(self, job_id: str, request: VideoGenerationRequest) -> None:
+        dst = self.workdir / f"{job_id}.mp4"
+        try:
+            source = Path(request.first_frame or "")
+            if not request.first_frame or not source.is_file():
+                raise RuntimeError("镜头缺少可用的首帧分镜图，无法生成真实画面视频")
+            self.workdir.mkdir(parents=True, exist_ok=True)
+            seed = uuid.uuid4().int % 100000
+            duration = max(request.duration, 1.0)
+            frames = max(round(duration * 24), 1)
+            x_expr = f"(iw-iw/zoom)*on/{frames}" if seed % 2 else "iw/2-(iw/zoom/2)"
+            video_filter = (
+                "scale=1600:900:force_original_aspect_ratio=increase,"
+                "crop=1600:900,"
+                f"zoompan=z='min(zoom+0.0012,1.16)':x='{x_expr}':"
+                f"y='ih/2-(ih/zoom/2)':d=1:s=1280x720:fps=24,format=yuv420p"
+            )
+            cmd = [
+                "ffmpeg", "-y", "-loglevel", "error", "-loop", "1", "-i", str(source),
+                "-vf", video_filter, "-frames:v", str(frames), "-c:v", "libx264",
+                "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-an",
+                "-movflags", "+faststart", str(dst),
+            ]
+            await asyncio.to_thread(_run, cmd)
+            if job_id in self._cancelled:
+                dst.unlink(missing_ok=True)
+                raise asyncio.CancelledError()
+            self._results[job_id] = GeneratedVideo(
+                path=str(dst), model=self.name, seed=seed, duration=duration
+            )
+        except asyncio.CancelledError:
+            dst.unlink(missing_ok=True)
+            raise
+        except Exception as e:  # noqa: BLE001
+            self._errors[job_id] = str(e)
