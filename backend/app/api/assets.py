@@ -257,11 +257,16 @@ async def upload_character_ref(
         file.filename or "reference.png",
         data,
     )
-    return {
-        **asset.model_dump(),
-        "view": view,
-        "media_url": asset_media_url(project_id, asset),
-    }
+    # 先算好返回体：下面的状态回退会 commit，届时 asset 已 expire，model_dump() 会变 {}
+    payload = asset.model_dump()
+    payload["view"] = view
+    payload["media_url"] = asset_media_url(project_id, asset)
+    # 参考图已换，旧的 prompt_block/hash 不再可信：退回待确认让用户重新锁定
+    if character.status == "LOCKED":
+        character.status = "PENDING_CONFIRM"
+        session.add(character)
+        session.commit()
+    return payload
 
 
 @router.post("/characters/{character_id}/lock")
@@ -272,10 +277,13 @@ def lock_character_api(
 ):
     character = _get_character(session, project_id, character_id)
     locked = lock_character(session, character)
+    # 必须先取快照：link_shots_to_assets 内部 commit 会让实例 expire，
+    # 而 model_dump() 不走 SQLAlchemy 的加载描述符，过期后会静默返回 {}
+    payload = locked.model_dump()
     link_shots_to_assets(session, project_id)
     return {
-        **locked.model_dump(),
-        "references": _refs(session, project_id, locked.id),
+        **payload,
+        "references": _refs(session, project_id, payload["id"]),
     }
 
 
@@ -380,11 +388,16 @@ async def upload_location_ref(
         file.filename or "reference.png",
         data,
     )
-    return {
-        **asset.model_dump(),
-        "view": view,
-        "media_url": asset_media_url(project_id, asset),
-    }
+    # 先算好返回体：下面的状态回退会 commit，届时 asset 已 expire，model_dump() 会变 {}
+    payload = asset.model_dump()
+    payload["view"] = view
+    payload["media_url"] = asset_media_url(project_id, asset)
+    # 参考图已换，旧的 prompt_block/hash 不再可信：退回待确认让用户重新锁定
+    if location.status == "LOCKED":
+        location.status = "PENDING_CONFIRM"
+        session.add(location)
+        session.commit()
+    return payload
 
 
 @router.post("/locations/{location_id}/lock")
@@ -395,8 +408,10 @@ def lock_location_api(
 ):
     location = _get_location(session, project_id, location_id)
     locked = lock_location(session, location)
+    # 同角色锁定：先取快照，避免 link 内部 commit 后 model_dump() 返回 {}
+    payload = locked.model_dump()
     link_shots_to_assets(session, project_id)
     return {
-        **locked.model_dump(),
-        "references": _refs(session, project_id, locked.id),
+        **payload,
+        "references": _refs(session, project_id, payload["id"]),
     }

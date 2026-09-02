@@ -130,3 +130,79 @@ export interface GenerationJob {
   created_at: string
   updated_at: string
 }
+
+export interface AssetReference {
+  id: string
+  project_id: string
+  type: string
+  path: string
+  proxy_path: string | null
+  source: string
+  meta: Record<string, unknown>
+  created_at: string
+  view: string | null
+  media_url: string
+}
+
+export type AssetStatus = 'DRAFT' | 'PENDING_CONFIRM' | 'LOCKED'
+
+export interface Character {
+  id: string
+  project_id: string
+  index: number
+  name: string
+  age_range: string | null
+  gender: string | null
+  role: string
+  description: string
+  appearance: string
+  costume: string
+  personality: string
+  visual_anchors: string[]
+  immutable_traits: string[]
+  identity_model_id: string | null
+  identity_model_type: string | null
+  prompt_block: string
+  prompt_block_hash: string
+  seed: number | null
+  source: string
+  status: AssetStatus
+  version: number
+  locked_at: string | null
+  created_at: string
+  updated_at: string
+  references: AssetReference[]
+  views: string[]
+}
+
+export interface Location {
+  id: string
+  project_id: string
+  index: number
+  scene_id: string | null
+  name: string
+  description: string
+  visual_style: string
+  materials: string[]
+  colors: string[]
+  visual_cues: string[]
+  immutable_elements: string[]
+  lighting_rules: string[]
+  time_of_day_default: string
+  prompt_block: string
+  prompt_block_hash: string
+  seed: number | null
+  source: string
+  status: AssetStatus
+  version: number
+  locked_at: string | null
+  created_at: string
+  updated_at: string
+  references: AssetReference[]
+  views: string[]
+}
+
+export interface AssetBundle {
+  characters: Character[]
+  locations: Location[]
+}

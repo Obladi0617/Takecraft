@@ -1,5 +1,9 @@
 import type {
+  AssetBundle,
+  AssetReference,
+  Character,
   GenerationJob,
+  Location,
   PipelineResponse,
   Project,
   Scene,
@@ -8,6 +12,8 @@ import type {
   Take,
   Timeline,
 } from './types'
+
+export type { AssetBundle, AssetReference, Character, Location } from './types'
 
 export const API_BASE =
   (import.meta.env.VITE_API_BASE as string | undefined) ??
@@ -164,4 +170,127 @@ export const generateTakes = (
 export const fetchGenerationJobs = (pid: string, shotId?: string) =>
   api<GenerationJob[]>(
     `/api/v1/projects/${pid}/generation-jobs${shotId ? `?shot_id=${shotId}` : ''}`,
+  )
+
+// ---------- 角色 / 场景资产（规格书第 13、14 节）----------
+
+export interface CharacterBody {
+  name: string
+  age_range?: string | null
+  gender?: string | null
+  role?: string
+  description?: string
+  appearance?: string
+  costume?: string
+  personality?: string
+  visual_anchors?: string[]
+  immutable_traits?: string[]
+  source?: string
+}
+
+export interface LocationBody {
+  name: string
+  scene_id?: string | null
+  description?: string
+  visual_style?: string
+  time_of_day_default?: string
+  materials?: string[]
+  colors?: string[]
+  visual_cues?: string[]
+  immutable_elements?: string[]
+  lighting_rules?: string[]
+  source?: string
+}
+
+export const fetchAssets = (pid: string) =>
+  api<AssetBundle>(`/api/v1/projects/${pid}/assets`)
+
+export const createCharacter = (pid: string, body: CharacterBody) =>
+  api<Character>(`/api/v1/projects/${pid}/characters`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+
+export const patchCharacter = (
+  pid: string,
+  characterId: string,
+  body: Partial<CharacterBody>,
+) =>
+  api<Character>(`/api/v1/projects/${pid}/characters/${characterId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+
+export const generateCharacterRefs = (pid: string, characterId: string) =>
+  api<{ job: GenerationJob }>(
+    `/api/v1/projects/${pid}/characters/${characterId}/references/generate`,
+    { method: 'POST' },
+  )
+
+export function uploadCharacterRef(
+  pid: string,
+  characterId: string,
+  file: File,
+  view: string,
+): Promise<AssetReference> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('view', view)
+  return api(`/api/v1/projects/${pid}/characters/${characterId}/references`, {
+    method: 'POST',
+    body: form,
+  })
+}
+
+export const lockCharacter = (pid: string, characterId: string) =>
+  api<Character>(`/api/v1/projects/${pid}/characters/${characterId}/lock`, {
+    method: 'POST',
+  })
+
+export const createLocation = (pid: string, body: LocationBody) =>
+  api<Location>(`/api/v1/projects/${pid}/locations`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+
+export const patchLocation = (
+  pid: string,
+  locationId: string,
+  body: Partial<LocationBody>,
+) =>
+  api<Location>(`/api/v1/projects/${pid}/locations/${locationId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+
+export const generateLocationRefs = (pid: string, locationId: string) =>
+  api<{ job: GenerationJob }>(
+    `/api/v1/projects/${pid}/locations/${locationId}/references/generate`,
+    { method: 'POST' },
+  )
+
+export function uploadLocationRef(
+  pid: string,
+  locationId: string,
+  file: File,
+  view: string,
+): Promise<AssetReference> {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('view', view)
+  return api(`/api/v1/projects/${pid}/locations/${locationId}/references`, {
+    method: 'POST',
+    body: form,
+  })
+}
+
+export const lockLocation = (pid: string, locationId: string) =>
+  api<Location>(`/api/v1/projects/${pid}/locations/${locationId}/lock`, {
+    method: 'POST',
+  })
+
+export const relinkShots = (pid: string) =>
+  api<{ links: Record<string, string[]> }>(
+    `/api/v1/projects/${pid}/assets/link-shots`,
+    { method: 'POST' },
   )

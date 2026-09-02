@@ -39,11 +39,11 @@
 |---|---|---|
 | 底层生产链（Shot→Take→Select→Timeline→Preview→Render） | ✅ 已验收 | Mock 全链路 E2E 通过，FFmpeg 成片可播 |
 | Storyboard 候选 / 选定 / 锁定 | ✅ 已验收 | 前后端均已接通 |
-| 统一生成队列 + Mock / MiniMax / ModelScope Adapter | ✅ 代码完成 | Mock 已验收；云后端**未用真实 Key 联调** |
+| 统一生成队列 + Mock / MiniMax / ModelScope Adapter | ✅ 代码完成 | Mock 已验收（含并发 id 冲突修复的完整 E2E 回归）；云后端**未用真实 Key 联调** |
 | 合规节点（Prompt 闸门 + 审计日志） | ✅ 已验收 | 三个入口全部接入 |
 | LangGraph 主流程 + 6 个 Agent（一句话全自动） | ✅ 已验收 | Mock 下 18 秒成片，含自动重拍 |
 | Preview 多片段连续播放 | ✅ 已验收 | 浏览器实测 6/6 片段、seek、重播无报错 |
-| 角色 / 场景资产链（Character / Location） | 🟡 后端完成，前端未做 | 建卡→三视图→锁定→Shot 自动引用→锚点注入提示词，后端 E2E 跑通一次；**前端资产面板未实现** |
+| 角色 / 场景资产链（Character / Location） | ✅ 已验收 | 建卡→三视图→锁定→Shot 自动引用→锚点注入提示词；前端资产面板已接通，浏览器实测「新建/生成/编辑/锁定/上传替换/重新关联」全部通过 |
 | VideoUnderstandingModel（Reviewer 真实看片） | ❌ 未实现 | 当前 Reviewer 只看文本，评分是模板值 |
 | 实时事件推送（SSE / WebSocket） | ❌ 未实现 | 前端靠 5s 轮询 |
 | Director Mode（interrupt / resume 人工介入） | ❌ 未实现 | 图目前一次性跑完，不可中途介入 |
@@ -52,7 +52,7 @@
 | 自动化测试（pytest） | ❌ 未实现 | 仓库内无 tests 目录 |
 | 微调 / 量化、参赛短片、复现 Notebook | ❌ 未开始 | 比赛评分项，见[未完成部分](#未完成部分按优先级) |
 
-最新提交：`9436087`（Preview 连续播放）之后的工作树包含资产链后端与队列并发修复，见下文。
+当前工作树（`9436087` Preview 连续播放之后）包含：资产链后端 + 前端资产面板、队列并发修复、mock 提示词分节压缩修复。完整回归项目：`data/projects/de3f0860b222`（一句话 → 3 场 6 镜 → 2 角色 3 场景全锁定 → 12 Take → 18 秒成片，零 FAILED、零卡 RUNNING）。
 
 ---
 
@@ -198,24 +198,29 @@ Key 缺失时对应云后端不可用（会抛错并把 job 标 FAILED），Mock
 | DELETE | `/projects/{pid}/shots/{shot_id}` | 删除镜头 |
 | POST | `/projects/{pid}/shots/{shot_id}/takes/{take_id}/select` | 选片：设置 `selected_take_id` |
 
-### 角色 / 场景资产（`api/assets.py`）— 新增，前端尚未接
+### 角色 / 场景资产（`api/assets.py`）— 前端入口：中间工作区「角色 / 场景资产」页签（`components/AssetPanel.tsx`）
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/projects/{pid}/assets` | 列出全部角色与场景资产，含 `references[]`（`view` / `source` / `media_url` / `meta.seed`）、`prompt_block`、`prompt_block_hash`、`seed`、`status`、可选 `views` |
 | POST | `/projects/{pid}/assets/link-shots` | 重跑「锁定后所有 Shot 自动引用」（§14），返回 `{shot_id: [character_id]}` |
 | POST | `/projects/{pid}/characters` | 手工建角色卡（`source=IMPORT` 时对应用户自填入口） |
-| PATCH | `/projects/{pid}/characters/{cid}` | 改角色卡；**已 LOCKED 返回 409** |
+| PATCH | `/projects/{pid}/characters/{cid}` | 改角色卡；**已 LOCKED 返回 409**，需先重新生成或上传参考图使其退回 `PENDING_CONFIRM` |
 | POST | `/projects/{pid}/characters/{cid}/references/generate` | 入队生成三视图 FRONT/SIDE/BACK（768×1024，`job_type=CHARACTER`），202 返回 job |
-| POST | `/projects/{pid}/characters/{cid}/references` | 上传参考图（multipart，`view` 表单字段，`source=USER`） |
+| POST | `/projects/{pid}/characters/{cid}/references` | 上传参考图（multipart，`view` 表单字段，`source=USER`）；**同一 view 会替换自动生成的那张**（共用 Asset id `{owner}_{view}`，避免一个槽位两张图超出 `MAX_REFERENCE_IMAGES`） |
 | POST | `/projects/{pid}/characters/{cid}/lock` | 锁定：编译 `prompt_block` + `hash`、固化 `seed`、`version+1`，随后自动重跑 Shot 引用 |
 | POST | `/projects/{pid}/locations` | 手工建场景资产（可带 `scene_id`） |
-| PATCH | `/projects/{pid}/locations/{lid}` | 改场景资产；LOCKED 返回 409 |
+| PATCH | `/projects/{pid}/locations/{lid}` | 改场景资产；LOCKED 返回 409（同上） |
 | POST | `/projects/{pid}/locations/{lid}/references/generate` | 入队生成 ESTABLISHING / KEY_ANGLE_A / KEY_ANGLE_B / DETAIL（`job_type=LOCATION`） |
-| POST | `/projects/{pid}/locations/{lid}/references` | 上传场景参考图 |
+| POST | `/projects/{pid}/locations/{lid}/references` | 上传场景参考图（同样按 view 替换） |
 | POST | `/projects/{pid}/locations/{lid}/lock` | 锁定场景资产 + 重跑 Shot 引用 |
 
 资产状态机：`DRAFT`（建卡）→ `PENDING_CONFIRM`（出图完成，等用户确认）→ `LOCKED`（身份冻结）。AUTO 模式下 `asset_design` 节点自动完成确认。
+
+两条**回退**规则（容易踩）：
+
+1. 对 `LOCKED` 资产重新生成参考图，或上传任一参考图，状态都会退回 `PENDING_CONFIRM`——参考图变了，旧的 `prompt_block` / `hash` 不再可信；
+2. 退回后锚点**暂停注入**镜头提示词（`shot_asset_blocks` 只取 LOCKED 资产），必须再次 `lock` 才会重编 `prompt_block`、`version+1` 并恢复注入。
 
 ### 分镜（`api/storyboards.py`）
 
@@ -288,14 +293,15 @@ backend/app/
     └── render.py        render_timeline：分段转码 + concat 成片
 
 frontend/src/
-├── App.tsx               工作台布局与路由状态
-├── api/client.ts         全部 HTTP 调用（★ 尚无 assets 相关函数）
-├── api/types.ts          与后端域模型对应的 TS 类型（★ 尚无 Character/Location）
+├── App.tsx               工作台布局与路由状态；★ 中间工作区两个页签（镜头工作台 / 角色·场景资产）
+├── api/client.ts         全部 HTTP 调用（★ 含 11 个资产链函数）
+├── api/types.ts          与后端域模型对应的 TS 类型（★ 含 Character/Location/AssetReference/AssetBundle）
 ├── stores/               Zustand 状态
 └── components/
     ├── ProjectList.tsx        项目列表 + 一句话生成入口
     ├── ProjectNavigator.tsx   Scene/Shot 导航
     ├── ShotWorkspace.tsx      镜头工作区：分镜候选、Take Pool、选片
+    ├── AssetPanel.tsx         ★ 角色/场景资产面板：三视图与参考图、状态徽标、建卡/编辑/生成/上传/锁定/重新关联
     ├── TimelineBar.tsx        时间线
     ├── PreviewPlayer.tsx      ★ 多片段连续播放播放器（自定义控制条 + 全局时间）
     ├── PipelinePanel.tsx      一句话流程阶段面板（5s 轮询）
@@ -449,25 +455,15 @@ data/
 6. **前端轮询会被浏览器节流**：标签页 hidden 时 react-query 停止轮询，验证最终态请重新挂载页面（用无头/自动化浏览器时尤其容易误判为「卡住」）。
 7. **每项目一个 SQLite 引擎**：`db.get_engine(pid)` 有进程内缓存，删除项目要调 `drop_engine`。跨项目查询不存在，列表页是遍历 `data/projects/*/project.db`。
 8. **LangGraph 节点会从头部重跑**：`interrupt()` 恢复时同一节点会重新执行（实测计数器 +1），所以人工介入必须放在**独立的 gate 节点**里，且绝不能排在 DB 写入 / 入队之后。这是 §24 的实现前提。
+9. **`model_dump()` 在 commit 之后会静默返回 `{}`**：commit 会 expire 实例，而 Pydantic 的 `model_dump()` 直接读 `__dict__`、不走 SQLAlchemy 的加载描述符（属性访问会触发重新加载，`model_dump()` 不会）。本轮 `characters/{id}/lock`、`references` 上传两个接口就中过招——返回体只剩手工拼的 `references` / `media_url`。**规则：要返回 `model_dump()`，先取快照，再调用任何会 commit 的 service**（如 `link_shots_to_assets`）。
 
 ---
 
 ## 未完成部分（按优先级）
 
 > 括号内是已完成的调研结论，接手时可直接照做，不必重新调研。
-
-### P0 — 资产链前端（后端已就绪，只差 UI）
-
-`backend/app/api/assets.py` 全部接口可用，`GET /assets` 已返回渲染所需的一切。缺：
-
-- `frontend/src/api/types.ts`：`Character` / `Location` / `AssetReference` 类型
-- `frontend/src/api/client.ts`：`fetchAssets`、`lockCharacter`、`lockLocation`、`generateCharacterRefs`、`generateLocationRefs`、`uploadCharacterRef`、`uploadLocationRef`、`patchCharacter`、`patchLocation`、`relinkShots`
-- 新组件（建议 `components/AssetPanel.tsx`）：角色卡 / 场景卡列表，展示三视图与参考图缩略图、`status` 徽标（DRAFT/PENDING_CONFIRM/LOCKED）、`prompt_block` 折叠查看、「确认并锁定」与「重新生成」按钮；挂进 `ShotWorkspace` 或工作台侧栏
-- 验收：AUTO 流程跑完后能在 UI 里看到 1~2 个角色 + 3 个场景已锁定，点开能看到三视图
-
-### P0 — 队列并发修复的回归验证
-
-本轮修了 `_execute` 回滚、`_do_storyboard` / `_do_video` 的 id 重试，**尚未跑完整 E2E 回归**。接手第一件事：新建 AUTO 项目跑一次 `POST /one-sentence`，确认 12 个 Take 全部 DONE、无 job 卡 RUNNING、`PIPELINE` 到 `COMPLETE` 且有 `render_url`。方法见[验收与自测方法](#验收与自测方法)。
+>
+> 原 P0 两项已完成：**资产链前端**（`components/AssetPanel.tsx`，接口见「HTTP 接口全清单 → 角色 / 场景资产」）与**队列并发修复的回归验证**（项目 `de3f0860b222`：12 Take 全 DONE、零 FAILED、零卡 RUNNING、成片 18 秒）。下面从 P1 起。
 
 ### P1 — VideoUnderstandingModel + Reviewer 真实看片（§11）
 
@@ -563,6 +559,17 @@ curl -s "http://127.0.0.1:8765/api/v1/projects/$PID/generation-jobs"
 
 # 6) 成片
 open "http://127.0.0.1:8765/media/$PID/renders/<render 文件名>"
+
+# 7) 前端资产面板（http://localhost:5173 → 打开项目 → 中间工作区切到「角色 / 场景资产」）
+#   应看到：每个角色一张卡（正面/侧面/背面三张缩略图）、每个场景一张卡（全景/主角度A/主角度B/细节），
+#           卡片头部有 定位·状态·version·seed 徽标，「查看锁定提示词」能展开冻结的 prompt_block 与 #hash
+#   交互闭环 1：点「重新生成三视图」→ 徽标变「待确认」、「编辑设定」解禁 → 改「不可变特征」保存
+#              → 点「确认并锁定」→ version+1、hash 变化、prompt_block 末尾出现刚加的特征
+#   交互闭环 2：点某个视图的「上传」选本地图 → 该视图缩略图换成上传图（Asset.source=USER）、
+#              同视图只保留一张、状态退回「待确认」
+#   交互闭环 3：「新建角色」填姓名+描述 → 卡片以「草稿」出现且三个视图为空 → 生成三视图 → 锁定
+#   「重新关联镜头」重跑 §14 的自动引用，可在左侧镜头列表/shot.character_ids 上看到结果
+#   注意：标签页处于后台时 react-query 轮询会被浏览器节流，验证最终态请刷新页面重新挂载（见「已知问题」第 6 条）
 ```
 
 排查入口：后端日志（uvicorn stdout）、`data/projects/{pid}/logs/compliance.jsonl`、`generationjob.error` 字段、`agentartifact` 里 `kind='stage'` 的 note。

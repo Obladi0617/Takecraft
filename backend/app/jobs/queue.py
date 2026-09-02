@@ -246,7 +246,9 @@ class GenerationQueue:
             asset_ids.append(asset.id)
             generated_views.append(view)
 
-        if owner.status == "DRAFT":
+        # 重新生成参考图即视为设定有变：LOCKED 也要退回待确认，
+        # 否则 api 层的 _assert_editable 会永久 409，编辑入口不可达
+        if owner.status != "PENDING_CONFIRM":
             owner.status = "PENDING_CONFIRM"
             session.add(owner)
         session.commit()

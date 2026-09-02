@@ -271,13 +271,21 @@ def store_uploaded_asset(
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
 
-    asset_id = f"{owner_id}_{view}_upload"
+    # 与生成图共用同一个 id：一个视图槽位只保留一行，上传即替换自动生成结果，
+    # 否则同视图会有两张参考图，shot_asset_blocks 可能超出 MAX_REFERENCE_IMAGES
+    asset_id = f"{owner_id}_{view}"
     asset = session.get(Asset, asset_id)
     if asset is None:
         asset = Asset(id=asset_id, project_id=project_id, type=asset_type, path=rel)
+    replaced_generated = asset.source == "GENERATED"
     asset.path = rel
     asset.source = "USER"
-    asset.meta = {"owner_id": owner_id, "view": view, "original_name": filename}
+    asset.meta = {
+        "owner_id": owner_id,
+        "view": view,
+        "original_name": filename,
+        "replaced_generated": replaced_generated,
+    }
     session.add(asset)
     session.commit()
     session.refresh(asset)
