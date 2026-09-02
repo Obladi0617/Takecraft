@@ -59,19 +59,44 @@ REVIEW_SYSTEM = """你是 AI Dailies 审核员，对生成的 Take 质量初筛�
 中文。只输出 JSON。"""
 
 
-async def _ask_json(model: TextModel, system: str, user: str) -> dict:
-    for attempt in range(2):
+async def _ask_json(
+    model: TextModel, system: str, user: str, required: tuple[str, ...] = ()
+) -> dict:
+    last_error: Exception = RuntimeError("未知 JSON 错误")
+    last_text = ""
+    for attempt in range(3):
+        retry_system = system
+        retry_user = user
+        if attempt:
+            retry_system += (
+                "\n上次输出不是完整合法 JSON。本次只输出紧凑的单行 JSON，"
+                "不要 Markdown、注释或尾随文本。"
+            )
+            retry_user += f"\n上次解析错误：{last_error}"
         try:
-            return extract_json(await model.complete(system, user))
-        except (ValueError, SyntaxError) as e:
-            if attempt == 1:
-                raise RuntimeError(f"模型输出解析失败: {e}") from e
-            await asyncio.sleep(0.2)
+            last_text = await model.complete(retry_system, retry_user)
+            result = extract_json(last_text)
+            missing = [
+                key for key in required if not result.get(key)
+            ]
+            if missing:
+                raise ValueError(f"JSON 缺少必填字段或字段为空: {', '.join(missing)}")
+            return result
+        except (ValueError, SyntaxError) as exc:
+            last_error = exc
+            if attempt == 2:
+                preview = last_text[:300].replace("\n", " ")
+                raise RuntimeError(
+                    f"模型输出解析失败: {exc}；回复开头: {preview}"
+                ) from exc
+            await asyncio.sleep(0.2 * (attempt + 1))
     raise RuntimeError("unreachable")
 
 
 async def writer_draft(model: TextModel, idea: str) -> dict:
-    return await _ask_json(model, SCREENPLAY_SYSTEM, f"一句话创意：{idea}")
+    return await _ask_json(
+        model, SCREENPLAY_SYSTEM, f"一句话创意：{idea}", ("logline", "scenes")
+    )
 
 
 async def director_bible(model: TextModel, idea: str, screenplay: dict) -> str:
@@ -79,6 +104,7 @@ async def director_bible(model: TextModel, idea: str, screenplay: dict) -> str:
         model,
         BIBLE_SYSTEM,
         f"创意：{idea}\n剧本：{json.dumps(screenplay, ensure_ascii=False)}",
+        ("visual_style", "color_rules"),
     )
     return data
 
@@ -88,6 +114,7 @@ async def producer_plan(model: TextModel, idea: str, screenplay: dict) -> dict:
         model,
         PLAN_SYSTEM,
         f"创意：{idea}\n剧本：{json.dumps(screenplay, ensure_ascii=False)}",
+        ("default_take_count",),
     )
 
 
@@ -96,6 +123,7 @@ async def character_cards(model: TextModel, screenplay: dict) -> list[dict]:
         model,
         CHARACTER_SYSTEM,
         f"剧本：{json.dumps(screenplay, ensure_ascii=False)}",
+        ("characters",),
     )
     cards = data.get("characters")
     return [c for c in cards if isinstance(c, dict)] if isinstance(cards, list) else []
@@ -106,6 +134,7 @@ async def location_cards(model: TextModel, screenplay: dict) -> list[dict]:
         model,
         LOCATION_SYSTEM,
         f"剧本：{json.dumps(screenplay, ensure_ascii=False)}",
+        ("locations",),
     )
     cards = data.get("locations")
     return [c for c in cards if isinstance(c, dict)] if isinstance(cards, list) else []
@@ -142,7 +171,9 @@ async def prompt_storyboard(
         + "；光线 "
         + "、".join(bible.get("lighting_rules", []) or [])
     )
-    data = await _ask_json(model, PROMPT_SYSTEM, "\n".join(blocks))
+    data = await _ask_json(
+        model, PROMPT_SYSTEM, "\n".join(blocks), ("prompt",)
+    )
     return str(data.get("prompt", shot_desc))
 
 
@@ -157,6 +188,7 @@ async def select_storyboard(
             model,
             SELECT_SB_SYSTEM,
             f"镜头：{shot_title}\n导演圣经：{json.dumps(bible, ensure_ascii=False)}\n候选：\n{listing}",
+            ("storyboard_id",),
         )
         chosen = data.get("storyboard_id")
         if chosen in {c["id"] for c in candidates}:
@@ -173,6 +205,7 @@ async def review_take(
         model,
         REVIEW_SYSTEM,
         f"镜头：{shot_title}\n提示词：{prompt}\nTake：{take_id}",
+        ("decision", "scores"),
     )
     data.setdefault("decision", "KEEP")
     data.setdefault("scores", {})

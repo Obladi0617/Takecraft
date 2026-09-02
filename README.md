@@ -160,6 +160,12 @@ npm run dev
 | `FILMAGENT_LLM_API_KEY` | 空 | 文本模型 Key |
 | `FILMAGENT_LLM_BASE_URL` | `https://api-inference.modelscope.cn` | 文本模型端点 |
 | `FILMAGENT_LLM_MODEL` | `Qwen/Qwen3.5-35B-A3B` | 文本模型名 |
+| `FILMAGENT_LLM_TIMEOUT` | `120` | 单次文本模型请求超时（秒） |
+| `FILMAGENT_LLM_MAX_RETRIES` | `3` | 网络错误、429、5xx 的最大尝试次数 |
+| `FILMAGENT_LLM_RETRY_BASE_DELAY` | `0.5` | 指数退避基础等待时间（秒） |
+| `FILMAGENT_LLM_MAX_TOKENS` | `4096` | 文本模型最大输出 token；`0` 表示不下发 |
+| `FILMAGENT_LLM_REASONING_EFFORT` | 空 | 兼容端点推理强度；本地 Demo 用 `none` 关闭思考 |
+| `FILMAGENT_LLM_JSON_MODE` | `false` | 是否请求 OpenAI 兼容 JSON mode；本地 Demo 开启 |
 | `FILMAGENT_MINIMAX_API_KEY` | 空 | MiniMax Key（视频） |
 | `FILMAGENT_MINIMAX_BASE_URL` | `https://api.minimax.cn` | |
 | `FILMAGENT_MINIMAX_VIDEO_MODEL` | `MiniMax-H3` | |
@@ -172,6 +178,42 @@ npm run dev
 
 Key 缺失时对应云后端不可用（会抛错并把 job 标 FAILED），Mock 后端始终可用。
 
+### Windows 本地模型 Demo（零 API 费用）
+
+`Start-Takecraft-Local.cmd` 会从仓库的 `.tools/ollama` 启动 Ollama，
+并把模型固定在 `.models/ollama`；文本 Agent 使用 `qwen3:4b`，图像、视频和 VLM
+保持 Mock。程序和模型目录均已加入 `.gitignore`。
+
+首次安装完成后双击 `Start-Takecraft-Local.cmd` 即可启动整套 Demo。
+可访问 `GET /api/v1/models/health` 检查端点、目标模型和各媒体后端状态。
+流水线异常会同时写入 `GenerationJob.error` 和 `AgentArtifact(kind=model_error)`。
+
+### 比赛 harness 部署（推荐）
+
+比赛环境只部署本仓库的前后端代码，不上传 `.tools/ollama`、`.models/ollama`、
+运行时 `data` 或任何模型权重。文本 Agent 通过 OpenAI 兼容接口接入比赛提供的
+魔粒 API；Key 只配置在部署平台的 Secret/环境变量中，不写入代码或 Git。
+
+至少配置：
+
+```text
+FILMAGENT_LLM_BACKEND=openai
+FILMAGENT_LLM_BASE_URL=<比赛指南给出的 API Base URL>
+FILMAGENT_LLM_API_KEY=<部署平台 Secret>
+FILMAGENT_LLM_MODEL=<比赛指南给出的模型 ID>
+FILMAGENT_LLM_MAX_RETRIES=2
+FILMAGENT_IMAGE_BACKEND=mock
+FILMAGENT_VIDEO_BACKEND=mock
+FILMAGENT_VLM_BACKEND=mock
+```
+
+部署后先请求 `GET /api/v1/models/health` 验证鉴权和模型名，再通过
+`POST /api/v1/projects/{pid}/one-sentence` 验证完整 harness。受限额度环境建议
+使用短创意和少镜头 Demo、缓存成功项目并避免重复运行。若比赛端点不是
+OpenAI `POST /v1/chat/completions` 兼容格式，只需新增一个文本适配器，流水线
+和前端不需要改动。本地 H 盘 Ollama 保留为开发与断网兜底。
+
+
 ---
 
 ## HTTP 接口全清单
@@ -183,6 +225,7 @@ Key 缺失时对应云后端不可用（会抛错并把 job 标 FAILED），Mock
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/health` | 存活探针 |
+| GET | `/models/health` | 文本模型端点与目标模型可用性检查 |
 | GET | `/projects` | 项目列表 |
 | POST | `/projects` | 创建项目（`name`、`idea`、`mode=AUTO\|DIRECTOR`、`default_take_count`）；同时建目录与 project.db |
 | GET | `/projects/{pid}` | 项目详情 |

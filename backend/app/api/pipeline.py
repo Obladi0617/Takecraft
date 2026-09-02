@@ -9,6 +9,7 @@ from ..db import get_engine, project_session
 from ..domain import AgentArtifact, GenerationJob, Project
 from ..graph.film_graph import run_film_pipeline
 from ..repositories import next_seq_and_id
+from ..services.generation import record_artifact
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["pipeline"])
 
@@ -86,10 +87,25 @@ async def _run_pipeline(project_id: str, job_id: str) -> None:
                 session.commit()
     except Exception as e:  # noqa: BLE001 — 编排任务必须记录失败原因
         with Session(get_engine(project_id)) as session:
+            message = str(e)[:2000]
+            try:
+                record_artifact(
+                    session,
+                    project_id,
+                    "model_error",
+                    "pipeline",
+                    {
+                        "job_id": job_id,
+                        "error_type": type(e).__name__,
+                        "message": message,
+                    },
+                )
+            except Exception:  # noqa: BLE001 - preserve original pipeline failure
+                pass
             job = session.get(GenerationJob, job_id)
             if job is not None:
                 job.status = "FAILED"
-                job.error = str(e)[:500]
+                job.error = message[:500]
                 session.add(job)
                 session.commit()
 

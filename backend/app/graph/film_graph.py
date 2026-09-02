@@ -50,6 +50,8 @@ from ..services.assets import (
     shot_asset_blocks,
 )
 from ..services.generation import (
+    enqueue_compare_jobs,
+    enqueue_review_jobs,
     enqueue_storyboard_job,
     enqueue_video_jobs,
     record_artifact,
@@ -57,6 +59,7 @@ from ..services.generation import (
     takes_of_shot,
     wait_for_jobs,
 )
+from ..services.review import rank_takes
 from ..services.timeline import auto_edit_timeline
 
 STORYBOARD_CANDIDATES = 2
@@ -114,6 +117,22 @@ def _shots_of_project(session: Session, project_id: str) -> list[Shot]:
             select(Shot).where(Shot.project_id == project_id).order_by(Shot.index)
         )
     )
+
+def _take_reviews(session: Session, project_id: str) -> dict[str, dict]:
+    """Return the latest persisted review for every take in a project."""
+    reviews: dict[str, dict] = {}
+    artifacts = session.exec(
+        select(AgentArtifact)
+        .where(
+            AgentArtifact.project_id == project_id,
+            AgentArtifact.kind == "take_review",
+        )
+        .order_by(AgentArtifact.index)
+    )
+    for artifact in artifacts:
+        if artifact.subject_id:
+            reviews[artifact.subject_id] = artifact.data
+    return reviews
 
 
 def _compliance_guard(project_id: str, prompt: str, stage: str) -> None:

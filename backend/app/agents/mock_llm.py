@@ -20,6 +20,9 @@ SCENE_ARCS = [
 class MockTextModel:
     name = "mock-text"
 
+    async def health(self) -> dict:
+        return {"ok": True, "backend": self.name, "model": self.name}
+
     async def complete(self, system: str, user: str) -> str:
         # 按特异关键词优先匹配：多个系统提示词都含「剧本」「导演」这类泛词
         if "审核" in system or "review" in system:

@@ -10,6 +10,8 @@ class TextModel(Protocol):
 
     async def complete(self, system: str, user: str) -> str: ...
 
+    async def health(self) -> dict: ...
+
 
 def extract_json(text: str) -> dict:
     """从 LLM 回复中提取第一个 JSON 对象。

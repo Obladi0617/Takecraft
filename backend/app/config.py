@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = "https://api-inference.modelscope.cn"
     llm_model: str = "Qwen/Qwen3.5-35B-A3B"
+    llm_timeout: float = 120.0
+    llm_max_retries: int = 3
+    llm_retry_base_delay: float = 0.5
+    llm_max_tokens: int = 4096
+    llm_reasoning_effort: str = ""
+    llm_json_mode: bool = False
+    llm_temperature: float = 0.2
 
     # 视觉理解模型（Reviewer 真实看片；openai 兼容端点皆可，抽帧走 base64 image_url）
     vlm_backend: str = "mock"  # mock | openai

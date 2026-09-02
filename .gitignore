@@ -23,6 +23,8 @@ dist/
 
 # 运行时数据（SQLite、项目媒体、渲染产物）
 data/
+.tools/
+.models/
 *.db
 *.db-journal
 *.sqlite3

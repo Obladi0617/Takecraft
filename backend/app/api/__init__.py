@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from . import (
     assets,
     jobs,
+    models,
     pipeline,
     projects,
     renders,
@@ -15,6 +16,7 @@ from . import (
 
 api_router = APIRouter()
 api_router.include_router(projects.router)
+api_router.include_router(models.router)
 api_router.include_router(scenes.router)
 api_router.include_router(shots.router)
 api_router.include_router(storyboards.router)
