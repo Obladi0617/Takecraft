@@ -4,8 +4,24 @@ from pathlib import Path
 
 from ..config import settings
 
-FFMPEG = shutil.which("ffmpeg")
-FFPROBE = shutil.which("ffprobe")
+def _resolve_binary(name: str) -> str | None:
+    """Resolve FFmpeg tools from PATH or the repository-local Windows bundle.
+
+    The backend is also launched directly by tests, IDEs and recovery scripts, so
+    it must not rely on Start-Takecraft-ModelScope.cmd having amended PATH first.
+    """
+    from_path = shutil.which(name)
+    if from_path:
+        return from_path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    executable = f"{name}.exe" if not name.lower().endswith(".exe") else name
+    candidates = sorted((repo_root / ".tools").glob(f"ffmpeg-*/bin/{executable}"))
+    return str(candidates[-1]) if candidates else None
+
+
+FFMPEG = _resolve_binary("ffmpeg")
+FFPROBE = _resolve_binary("ffprobe")
 
 
 def ffmpeg_available() -> bool:

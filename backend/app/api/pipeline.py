@@ -7,7 +7,7 @@ from sqlmodel import Session, select
 
 from ..db import get_engine, project_session
 from ..domain import AgentArtifact, GenerationJob, Project
-from ..graph.film_graph import run_film_pipeline
+from ..graph.film_graph import resume_film_pipeline, run_film_pipeline
 from ..repositories import next_seq_and_id
 from ..services.generation import record_artifact
 
@@ -70,9 +70,43 @@ async def one_sentence(
     return {"job": _job_dict(job), "message": "一句话全自动流程已启动"}
 
 
-async def _run_pipeline(project_id: str, job_id: str) -> None:
+@router.post("/resume", status_code=202)
+async def resume_pipeline(
+    project_id: str, session: Session = Depends(project_session)
+):
+    project = session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    active = session.exec(
+        select(GenerationJob).where(
+            GenerationJob.project_id == project_id,
+            GenerationJob.job_type == "PIPELINE",
+            GenerationJob.status.in_(ACTIVE_STATUSES),  # type: ignore[arg-type]
+        )
+    ).first()
+    if active is not None:
+        raise HTTPException(status_code=409, detail=f"已有进行中的自动流程任务: {active.id}")
+
+    index, job_id = next_seq_and_id(session, GenerationJob, project_id, "job")
+    job = GenerationJob(
+        id=job_id,
+        project_id=project_id,
+        index=index,
+        job_type="PIPELINE",
+        priority="CRITICAL",
+        status="RUNNING",
+        payload={"idea": project.idea or project.name, "resume_from": "REVIEWING"},
+    )
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    asyncio.create_task(_run_pipeline(project_id, job.id, resume=True))
+    return {"job": _job_dict(job), "message": "已从审核阶段断点续跑"}
+
+
+async def _run_pipeline(project_id: str, job_id: str, resume: bool = False) -> None:
     try:
-        final = await run_film_pipeline(project_id)
+        final = await (resume_film_pipeline(project_id) if resume else run_film_pipeline(project_id))
         with Session(get_engine(project_id)) as session:
             job = session.get(GenerationJob, job_id)
             if job is not None:

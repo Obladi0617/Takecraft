@@ -438,7 +438,20 @@ async def reviewing(state: ProductionState) -> dict:
     blocked_notes: list[str] = []
 
     with _session(project_id) as session:
-        reviewed = set(_take_reviews(session, project_id))
+        previous_reviews = _take_reviews(session, project_id)
+        # Technical decode/sampling failures are retried after a restart or tool
+        # repair; they do not represent a creative rejection of the Take.
+        reviewed = {
+            take_id
+            for take_id, review in previous_reviews.items()
+            if not (
+                review.get("reviewer", {}).get("frame_count", 0) == 0
+                and any(
+                    gate.get("code") in {"decode", "sampling"}
+                    for gate in review.get("gates", [])
+                )
+            )
+        }
         targets = [
             (shot.id, take.id)
             for shot in _shots_of_project(session, project_id)
@@ -683,4 +696,45 @@ async def run_film_pipeline(project_id: str) -> dict:
         "needs_retake_shot_ids": [],
     }
     final = await build_film_graph().ainvoke(initial)
+    return dict(final)
+
+def build_resume_graph():
+    """Resume an interrupted production from review, preserving all existing media."""
+    graph = StateGraph(ProductionState)
+    graph.add_node("reviewing", reviewing)
+    graph.add_node("video_generation", video_generation)
+    graph.add_node("take_selection", take_selection)
+    graph.add_node("editing", editing)
+    graph.add_node("rendering", rendering)
+    graph.add_node("complete", complete)
+    graph.add_edge(START, "reviewing")
+    graph.add_conditional_edges(
+        "reviewing",
+        _route_after_review,
+        {"video_generation": "video_generation", "take_selection": "take_selection"},
+    )
+    graph.add_edge("video_generation", "reviewing")
+    graph.add_edge("take_selection", "editing")
+    graph.add_edge("editing", "rendering")
+    graph.add_edge("rendering", "complete")
+    graph.add_edge("complete", END)
+    return graph.compile()
+
+
+async def resume_film_pipeline(project_id: str) -> dict:
+    """Resume after video generation/review without rebuilding script or assets."""
+    with _session(project_id) as session:
+        project = session.get(Project, project_id)
+        if project is None:
+            raise RuntimeError("project not found")
+        shot_ids = [shot.id for shot in _shots_of_project(session, project_id)]
+    initial: ProductionState = {
+        "project_id": project_id,
+        "idea": project.idea or project.name,
+        "stage": "REVIEWING",
+        "shot_ids": shot_ids,
+        "retake_rounds": {},
+        "needs_retake_shot_ids": [],
+    }
+    final = await build_resume_graph().ainvoke(initial)
     return dict(final)

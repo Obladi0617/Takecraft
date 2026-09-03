@@ -348,9 +348,12 @@ class ComfyUIVideoGenerator(_CloudVideoBackend):
         self.workflow_path = Path(__file__).parent / "workflows" / "minimax_h3_i2v.api.json"
 
     async def _generate(self, request: VideoGenerationRequest) -> GeneratedVideo:
-        source = Path(request.first_frame or "")
-        if not request.first_frame or not source.is_file():
-            raise RuntimeError("DGX 图生视频需要有效的首帧分镜图")
+        source_path = request.first_frame or next(
+            (path for path in request.reference_images if Path(path).is_file()), ""
+        )
+        source = Path(source_path)
+        if not source_path or not source.is_file():
+            raise RuntimeError("DGX 图生视频需要有效的首帧或资产参考图")
         base = settings.comfyui_base_url.rstrip("/")
         timeout = httpx.Timeout(60.0, read=120.0)
         async with httpx.AsyncClient(timeout=timeout) as client:

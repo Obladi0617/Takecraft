@@ -7,6 +7,7 @@
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -132,12 +133,14 @@ def frame_stats(path: Path, expected_duration: float) -> VideoStats:
     if not probe.decodable or not FFPROBE:
         return stats
 
+    # Open the file as a normal input. Using ffprobe's ``movie=...`` lavfi
+    # source is fragile on Windows because drive-letter colons and backslashes
+    # are parsed as filtergraph syntax even after conventional escaping.
     result = subprocess.run(
         [
-            FFPROBE, "-v", "error", "-f", "lavfi",
-            "-i", f"movie={_escape_filter_path(path)},signalstats",
-            "-show_entries", "frame_tags=lavfi.signalstats.YAVG,lavfi.signalstats.YDIF",
-            "-of", "csv=p=0",
+            FFMPEG, "-v", "error", "-i", str(path),
+            "-vf", "signalstats,metadata=print:file=-",
+            "-an", "-f", "null", os.devnull,
         ],
         capture_output=True,
         text=True,
@@ -149,15 +152,20 @@ def frame_stats(path: Path, expected_duration: float) -> VideoStats:
 
     brightness: list[float] = []
     motion: list[float] = []
+    current_yavg: float | None = None
     for line in result.stdout.splitlines():
-        fields = [f for f in line.split(",") if f.strip()]
-        if len(fields) < 2:
-            continue
-        try:
-            brightness.append(float(fields[0]))
-            motion.append(float(fields[1]))
-        except ValueError:
-            continue
+        if line.startswith("lavfi.signalstats.YAVG="):
+            try:
+                current_yavg = float(line.partition("=")[2])
+            except ValueError:
+                current_yavg = None
+        elif line.startswith("lavfi.signalstats.YDIF=") and current_yavg is not None:
+            try:
+                brightness.append(current_yavg)
+                motion.append(float(line.partition("=")[2]))
+            except ValueError:
+                pass
+            current_yavg = None
     if not brightness:
         stats.probe.decodable = False
         stats.probe.error = "signalstats 未产出任何帧"

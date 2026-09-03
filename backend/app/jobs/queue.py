@@ -377,8 +377,14 @@ class GenerationQueue:
             raise RuntimeError(f"Shot 不存在: {take.shot_id}")
 
         # ffprobe/ffmpeg 是子进程调用，必须丢到线程里，否则整条队列会被堵住
+        expected_duration = max(shot.duration_target, 1.0)
+        # MiniMax H3 currently generates at least five seconds. Its 17-frame
+        # latent alignment yields about 5.17s at 24 fps, within the normal
+        # tolerance when reviewed against the actual five-second request.
+        if settings.video_backend == "comfyui":
+            expected_duration = max(expected_duration, 5.0)
         stats, failures, frames = await asyncio.to_thread(
-            measure_and_sample, job.project_id, take, max(shot.duration_target, 1.0)
+            measure_and_sample, job.project_id, take, expected_duration
         )
 
         insight = None
