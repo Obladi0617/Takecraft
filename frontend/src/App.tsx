@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useAppStore } from './stores/app'
 import { fetchHumanReview } from './api/client'
@@ -15,6 +15,7 @@ import ReviewPanel from './components/ReviewPanel'
 export default function App() {
   const projectId = useAppStore((s) => s.projectId)
   const [tab, setTab] = useState<'shot' | 'assets' | 'review'>('shot')
+  const previousStage = useRef<string | undefined>(undefined)
 
   const { data: humanReview } = useQuery({
     queryKey: ['human-review', projectId],
@@ -25,9 +26,13 @@ export default function App() {
 
   const needsReview = humanReview && ['SCRIPT_REVIEW', 'ASSET_REVIEW', 'STORYBOARD_REVIEW'].includes(humanReview.stage)
   useEffect(() => {
-    if (needsReview) setTab('review')
-    else if (tab === 'review') setTab('shot')
-  }, [needsReview, tab])
+    const stage = humanReview?.stage
+    if (stage !== previousStage.current) {
+      if (needsReview) setTab('review')
+      else setTab((current) => current === 'review' ? 'shot' : current)
+      previousStage.current = stage
+    }
+  }, [humanReview?.stage, needsReview])
 
   if (!projectId) return <ProjectList />
 

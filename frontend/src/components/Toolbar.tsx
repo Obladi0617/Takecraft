@@ -10,6 +10,7 @@ export default function Toolbar() {
     queryKey: ['project', projectId],
     queryFn: () => fetchProject(projectId!),
     enabled: projectId !== null,
+    refetchInterval: 1200,
   })
 
   return (

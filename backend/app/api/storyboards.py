@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["storyboards"])
 
 class StoryboardGenerateIn(BaseModel):
     prompt: str | None = None
-    count: int = 4
+    count: int = 2
     width: int = 1024
     height: int = 576
 

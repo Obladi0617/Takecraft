@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   API_BASE,
+  fetchAssets,
   fetchHumanReview,
   submitScriptReview,
   submitAssetReview,
@@ -20,6 +21,13 @@ export default function ReviewPanel() {
     queryKey: ['human-review', projectId],
     queryFn: () => fetchHumanReview(projectId),
     refetchInterval: 1200,
+  })
+
+  const { data: assetBundle } = useQuery({
+    queryKey: ['assets', projectId],
+    queryFn: () => fetchAssets(projectId),
+    enabled: humanReview?.stage === 'ASSET_REVIEW',
+    refetchInterval: humanReview?.stage === 'ASSET_REVIEW' ? 1500 : false,
   })
 
   const scriptReview = useMutation({
@@ -144,6 +152,14 @@ export default function ReviewPanel() {
                     <p><strong>不可变特征：</strong>{char.immutable_traits.join('、')}</p>
                   )}
                   <span className={`badge ${char.status === 'LOCKED' ? 'ok' : ''}`}>{char.status}</span>
+                  <div className="asset-refs review-asset-refs">
+                    {(assetBundle?.characters.find((item) => item.id === char.id)?.references ?? []).map((ref) => (
+                      <div key={ref.id} className="asset-view">
+                        <img src={`${API_BASE}${ref.media_url}`} alt={`${char.name} ${ref.view}`} />
+                        <div className="asset-view-foot"><span>{ref.view}</span></div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ))}
             </div>
@@ -169,6 +185,14 @@ export default function ReviewPanel() {
                       <p><strong>固定元素：</strong>{loc.immutable_elements.join('、')}</p>
                     )}
                     <span className={`badge ${loc.status === 'LOCKED' ? 'ok' : ''}`}>{loc.status}</span>
+                    <div className="asset-refs review-asset-refs">
+                      {(assetBundle?.locations.find((item) => item.id === loc.id)?.references ?? []).map((ref) => (
+                        <div key={ref.id} className="asset-view">
+                          <img src={`${API_BASE}${ref.media_url}`} alt={`${loc.name} ${ref.view}`} />
+                          <div className="asset-view-foot"><span>{ref.view}</span></div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -183,10 +207,14 @@ export default function ReviewPanel() {
             <div className="action-buttons">
               <button
                 className="primary"
-                disabled={assetReview.isPending}
+                disabled={assetReview.isPending || assetReview.isSuccess}
                 onClick={() => assetReview.mutate('APPROVE')}
               >
-                通过资产并继续
+                {assetReview.isPending
+                  ? '正在提交...'
+                  : assetReview.isSuccess
+                    ? '已通过，正在生成资产参考图...'
+                    : '通过资产并继续'}
               </button>
               <button
                 disabled={assetReview.isPending || !assetFeedback.trim()}

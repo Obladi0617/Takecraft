@@ -28,7 +28,7 @@ export default function ShotWorkspace() {
   const [prompt, setPrompt] = useState('')
   const [uploading, setUploading] = useState(false)
   const [sbPrompt, setSbPrompt] = useState('')
-  const [sbCount, setSbCount] = useState(4)
+  const [sbCount, setSbCount] = useState(2)
   const [forceAsk, setForceAsk] = useState(false)
   const [reviewFeedback, setReviewFeedback] = useState<Record<string, string>>({})
 
