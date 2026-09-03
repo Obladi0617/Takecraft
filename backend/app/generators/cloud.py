@@ -1,4 +1,7 @@
 import asyncio
+import json
+import mimetypes
+import random
 import uuid
 from pathlib import Path
 
@@ -209,7 +212,6 @@ class ModelScopeVideoGenerator(_CloudVideoBackend):
                     "model": model,
                     "prompt": request.prompt,
                     "negative_prompt": request.negative_prompt or "",
-                    "size": size,
                 },
             )
             resp.raise_for_status()
@@ -313,3 +315,79 @@ class MiniMaxVideoGenerator(_CloudVideoBackend):
                 if file.get(key):
                     return file[key]
         return data.get("download_url")
+
+
+class ComfyUIVideoGenerator(_CloudVideoBackend):
+    """MiniMax H3 image-to-video through a trusted ComfyUI HTTP endpoint."""
+
+    name = "comfyui:minimax-h3"
+
+    def __init__(self, workdir: Path):
+        self.workdir = workdir
+        self.registry = CloudJobRegistry()
+        self.workflow_path = Path(__file__).parent / "workflows" / "minimax_h3_i2v.api.json"
+
+    async def _generate(self, request: VideoGenerationRequest) -> GeneratedVideo:
+        source = Path(request.first_frame or "")
+        if not request.first_frame or not source.is_file():
+            raise RuntimeError("DGX 图生视频需要有效的首帧分镜图")
+        base = settings.comfyui_base_url.rstrip("/")
+        timeout = httpx.Timeout(60.0, read=120.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            health = await client.get(f"{base}/system_stats")
+            health.raise_for_status()
+            mime = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
+            upload = await client.post(
+                f"{base}/upload/image",
+                files={"image": (source.name, source.read_bytes(), mime)},
+                data={"type": "input", "subfolder": "takecraft", "overwrite": "true"},
+            )
+            upload.raise_for_status()
+            uploaded = upload.json()
+            image_name = "/".join(
+                part for part in (uploaded.get("subfolder", ""), uploaded["name"]) if part
+            )
+            workflow = json.loads(self.workflow_path.read_text(encoding="utf-8"))
+            seed = random.SystemRandom().randrange(0, 2**48)
+            workflow["114"]["inputs"]["image"] = image_name
+            workflow["104"]["inputs"]["prompt"] = request.prompt
+            workflow["111"]["inputs"]["value"] = max(5.0, float(request.duration))
+            workflow["115"]["inputs"]["aspect_ratio"] = "16:9 (Widescreen)"
+            workflow["115"]["inputs"]["megapixels"] = settings.comfyui_megapixels
+            workflow["15"]["inputs"]["noise_seed"] = seed
+            workflow["92"]["inputs"]["filename_prefix"] = f"video/Takecraft_{request.shot_id}"
+            queued = await client.post(
+                f"{base}/prompt",
+                json={"prompt": workflow, "client_id": f"takecraft-{uuid.uuid4()}"},
+            )
+            if queued.is_error:
+                raise RuntimeError(f"DGX 工作流提交失败: {queued.text[:1500]}")
+            prompt_id = queued.json()["prompt_id"]
+            deadline = asyncio.get_running_loop().time() + settings.comfyui_timeout
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(POLL_INTERVAL)
+                response = await client.get(f"{base}/history/{prompt_id}")
+                response.raise_for_status()
+                record = response.json().get(prompt_id)
+                if not record:
+                    continue
+                status = record.get("status", {})
+                if status.get("status_str") == "error":
+                    messages = [m[1] for m in status.get("messages", []) if m[0] == "execution_error"]
+                    raise RuntimeError(f"DGX 视频生成失败: {(messages[-1] if messages else status)}")
+                output = record.get("outputs", {}).get("92", {})
+                files = output.get("images") or output.get("videos") or []
+                if not files:
+                    raise RuntimeError(f"DGX 任务完成但没有视频输出: {record.get('outputs', {})}")
+                item = files[0]
+                video = await client.get(
+                    f"{base}/view",
+                    params={"filename": item["filename"], "subfolder": item.get("subfolder", ""), "type": item.get("type", "output")},
+                )
+                video.raise_for_status()
+                self.workdir.mkdir(parents=True, exist_ok=True)
+                dst = self.workdir / f"dgx_{prompt_id}.mp4"
+                dst.write_bytes(video.content)
+                await client.post(f"{base}/history", json={"delete": [prompt_id]})
+                return GeneratedVideo(path=str(dst), model=self.name, seed=seed, duration=request.duration)
+            raise TimeoutError(f"DGX 视频任务 {prompt_id} 超过等待时间")

@@ -16,8 +16,11 @@ class Settings(BaseSettings):
         ]
     )
     image_backend: str = "mock"  # mock | modelscope
-    video_backend: str = "mock"  # mock | image_motion | minimax | modelscope
+    video_backend: str = "mock"  # mock | image_motion | comfyui | minimax | modelscope
     video_generation_concurrency: int = 1  # 规格书第 24 节
+    comfyui_base_url: str = "http://127.0.0.1:8188"
+    comfyui_timeout: float = 3600.0
+    comfyui_megapixels: float = 0.4
 
     # 云端 API（规格补丁：云本地协同；Key 缺失时相应后端不可用）
     minimax_api_key: str = ""

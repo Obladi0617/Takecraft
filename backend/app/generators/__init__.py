@@ -1,7 +1,7 @@
 from ..config import settings
 from ..db import project_path
 from .base import ImageGenerator, VideoGenerator
-from .cloud import ModelScopeImageGenerator, ModelScopeVideoGenerator, MiniMaxVideoGenerator
+from .cloud import ComfyUIVideoGenerator, ModelScopeImageGenerator, ModelScopeVideoGenerator, MiniMaxVideoGenerator
 from .mock import ImageMotionVideoGenerator, MockImageGenerator, MockVideoGenerator
 
 
@@ -21,6 +21,8 @@ def get_video_generator(project_id: str) -> VideoGenerator:
         return MockVideoGenerator(project_path(project_id) / "takes" / "_generated")
     if backend == "image_motion":
         return ImageMotionVideoGenerator(project_path(project_id) / "takes" / "_generated")
+    if backend == "comfyui":
+        return ComfyUIVideoGenerator(project_path(project_id) / "takes" / "_generated")
     if backend == "minimax":
         return MiniMaxVideoGenerator(project_path(project_id) / "takes" / "_generated")
     if backend == "modelscope":
