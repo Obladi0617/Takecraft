@@ -3,6 +3,7 @@ import type {
   AssetReference,
   Character,
   GenerationJob,
+  HumanReviewState,
   Location,
   PipelineResponse,
   Project,
@@ -294,3 +295,52 @@ export const relinkShots = (pid: string) =>
     `/api/v1/projects/${pid}/assets/link-shots`,
     { method: 'POST' },
   )
+export const fetchHumanReview = (pid: string) =>
+  api<HumanReviewState>(`/api/v1/projects/${pid}/human-review`)
+
+export const submitScriptReview = (
+  pid: string,
+  decision: 'APPROVE' | 'REVISE',
+  feedback = '',
+) =>
+  api<{ ok: boolean; review_id: string; decision: string }>(
+    `/api/v1/projects/${pid}/script-review`,
+    { method: 'POST', body: JSON.stringify({ decision, feedback }) },
+  )
+
+export const submitAssetReview = (
+  pid: string,
+  decision: 'APPROVE' | 'REVISE',
+  feedback = '',
+) =>
+  api<{ ok: boolean; review_id: string; decision: string }>(
+    `/api/v1/projects/${pid}/asset-review`,
+    { method: 'POST', body: JSON.stringify({ decision, feedback }) },
+  )
+
+export const submitStoryboardReview = (
+  pid: string,
+  decision: 'APPROVE' | 'REVISE',
+  feedback = '',
+) =>
+  api<{ ok: boolean; review_id: string; decision: string }>(
+    `/api/v1/projects/${pid}/storyboard-review`,
+    { method: 'POST', body: JSON.stringify({ decision, feedback }) },
+  )
+
+export const submitTakeReview = (
+  pid: string,
+  takeId: string,
+  decision: 'APPROVE' | 'RETAKE',
+  feedback = '',
+) =>
+  api<{
+    ok: boolean
+    review_id: string
+    decision: string
+    job?: GenerationJob
+    revised_prompt?: string
+  }>(`/api/v1/projects/${pid}/takes/${takeId}/human-review`, {
+    method: 'POST',
+    body: JSON.stringify({ decision, feedback }),
+  })

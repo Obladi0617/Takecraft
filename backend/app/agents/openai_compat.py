@@ -82,7 +82,18 @@ class OpenAICompatibleTextModel:
                     )
                     response.raise_for_status()
                     data = response.json()
-                    content = data["choices"][0]["message"]["content"]
+                    if not isinstance(data, dict):
+                        raise ValueError(f"模型返回非 JSON 对象：{type(data).__name__}")
+                    choices = data.get("choices")
+                    if not choices or not isinstance(choices, list):
+                        raise ValueError(f"模型返回无 choices: {data}")
+                    first = choices[0]
+                    if not isinstance(first, dict):
+                        raise ValueError(f"choice[0] 非对象：{type(first).__name__}")
+                    message = first.get("message")
+                    if not isinstance(message, dict):
+                        raise ValueError(f"模型返回无 message: {first}")
+                    content = message.get("content")
                     if not isinstance(content, str) or not content.strip():
                         raise ValueError("模型返回了空内容")
                     return content

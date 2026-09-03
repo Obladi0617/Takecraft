@@ -11,6 +11,7 @@ from .base import (
     ImageGenerationRequest,
     VideoGenerationRequest,
 )
+from ..media.ffmpeg import FFMPEG
 
 
 def _hex_color(seed: int, offset: float) -> str:
@@ -20,6 +21,10 @@ def _hex_color(seed: int, offset: float) -> str:
 
 
 def _run(cmd: list[str]) -> None:
+    if not FFMPEG:
+        raise RuntimeError('未找到 FFmpeg，请安装 FFmpeg 或配置项目内置运行时')
+    if cmd and cmd[0].lower() == 'ffmpeg':
+        cmd = [FFMPEG, *cmd[1:]]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg 失败: {result.stderr[-300:]}")

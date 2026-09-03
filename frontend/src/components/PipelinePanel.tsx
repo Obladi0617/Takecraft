@@ -5,10 +5,14 @@ import { useAppStore } from '../stores/app'
 
 const CANONICAL_STAGES: { key: string; label: string; agent: string }[] = [
   { key: 'SCRIPTING', label: '剧本创作', agent: 'Writer' },
+  { key: 'SCRIPT_REVIEW', label: '剧本人工审核', agent: 'Human' },
   { key: 'ASSET_DESIGN', label: '资产设计', agent: 'Director / Producer' },
+  { key: 'ASSET_REVIEW', label: '资产人工审核', agent: 'Human' },
   { key: 'STORYBOARDING', label: '分镜生成', agent: 'Prompt / Director' },
+  { key: 'STORYBOARD_REVIEW', label: '分镜人工审核', agent: 'Human' },
   { key: 'VIDEO_GENERATION', label: '视频生成', agent: '生成队列' },
   { key: 'REVIEWING', label: '质量审核', agent: 'Reviewer' },
+  { key: 'HUMAN_TAKE_REVIEW', label: 'Take 人工复审', agent: 'Human' },
   { key: 'TAKE_SELECTION', label: '选片', agent: 'Reviewer' },
   { key: 'PREVIEW', label: '自动剪辑', agent: 'Editor' },
   { key: 'RENDERING', label: '成片渲染', agent: 'FFmpeg' },

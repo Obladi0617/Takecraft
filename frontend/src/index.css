@@ -1005,3 +1005,271 @@ textarea:focus {
   display: flex;
   gap: 8px;
 }
+
+/* ---------- 人工审核卡片 ---------- */
+
+.human-review-card {
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 14px;
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.human-review-card h4 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--accent);
+}
+
+.human-review-card textarea {
+  width: 100%;
+  min-height: 60px;
+  resize: vertical;
+}
+
+.human-review-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.screenplay-scenes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.script-shot {
+  margin: 4px 0;
+  padding-left: 12px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.asset-review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.asset-review-list h5 {
+  margin: 8px 0 4px;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.asset-review-list .asset-card {
+  padding: 10px;
+  font-size: 13px;
+}
+
+.asset-review-list .asset-card p {
+  margin: 4px 0;
+  line-height: 1.5;
+}
+
+.storyboard-review-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.storyboard-review-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.storyboard-review-card.locked {
+  border-color: var(--ok);
+}
+
+.storyboard-review-card img {
+  width: 100%;
+  aspect-ratio: 16/9;
+  object-fit: cover;
+  border-radius: 5px;
+  background: #000;
+}
+
+.storyboard-review-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+
+/* ---------- 中央审核面板 ---------- */
+
+.review-panel {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.review-panel.empty {
+  align-items: center;
+  justify-content: center;
+}
+
+.review-panel h3 {
+  margin: 0;
+  font-size: 18px;
+  color: var(--accent);
+}
+
+.review-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.screenplay-preview {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.screenplay-preview h4 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.logline {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  padding: 10px;
+  background: var(--panel-2);
+  border-radius: 6px;
+}
+
+.scenes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.scene-block {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.scene-block h5 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.shots-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.shot-block {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.shot-block p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.assets-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.characters-section,
+.locations-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.characters-section h4,
+.locations-section h4 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.storyboards-preview {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.storyboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.storyboard-card.locked {
+  border-color: var(--ok);
+}
+
+.review-actions {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.review-actions textarea {
+  width: 100%;
+  min-height: 80px;
+  resize: vertical;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 10px;
+}
+
+.action-buttons button {
+  flex: 1;
+}

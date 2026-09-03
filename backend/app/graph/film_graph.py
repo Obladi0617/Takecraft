@@ -18,6 +18,10 @@ from ..agents.film_agents import (
     location_cards,
     producer_plan,
     prompt_storyboard,
+    revise_character_cards,
+    revise_location_cards,
+    revise_screenplay,
+    revise_storyboard_prompts,
     review_take,
     select_storyboard,
     writer_draft,
@@ -135,6 +139,20 @@ def _take_reviews(session: Session, project_id: str) -> dict[str, dict]:
     return reviews
 
 
+def _latest_human_decisions(
+    session: Session, project_id: str, kind: str
+) -> dict[str, dict]:
+    decisions: dict[str, dict] = {}
+    artifacts = session.exec(
+        select(AgentArtifact)
+        .where(AgentArtifact.project_id == project_id, AgentArtifact.kind == kind)
+        .order_by(AgentArtifact.index)
+    )
+    for artifact in artifacts:
+        if artifact.subject_id:
+            decisions[artifact.subject_id] = artifact.data
+    return decisions
+
 def _compliance_guard(project_id: str, prompt: str, stage: str) -> None:
     result = compliance_gate.check(prompt)
     compliance_gate.audit(project_id, stage, prompt, result)
@@ -155,6 +173,42 @@ async def ideation(state: ProductionState) -> dict:
     return _stage_update(project_id, "SCRIPTING", f"剧本完成：{screenplay.get('logline', '')[:50]}")
 
 
+async def script_review(state: ProductionState) -> dict:
+    """Durable human gate: approve the screenplay or revise it from feedback."""
+    project_id, idea = state["project_id"], state["idea"]
+    _stage_update(project_id, "SCRIPT_REVIEW", "剧本已生成，等待人工审核")
+    model = get_text_model()
+    while True:
+        with _session(project_id) as session:
+            artifact = session.exec(
+                select(AgentArtifact)
+                .where(
+                    AgentArtifact.project_id == project_id,
+                    AgentArtifact.kind == "screenplay",
+                )
+                .order_by(AgentArtifact.index.desc())
+            ).first()
+            if artifact is None:
+                raise RuntimeError("剧本产物不存在")
+            screenplay_id = artifact.id
+            screenplay = artifact.data
+            decision = _latest_human_decisions(
+                session, project_id, "human_script_review"
+            ).get(screenplay_id)
+        if not decision:
+            await asyncio.sleep(1.0)
+            continue
+        if decision.get("decision") == "APPROVE":
+            return _stage_update(project_id, "SCRIPTING", "人工审核已通过剧本")
+        feedback = str(decision.get("feedback") or "").strip()
+        if not feedback:
+            await asyncio.sleep(1.0)
+            continue
+        revised = await revise_screenplay(model, idea, screenplay, feedback)
+        with _session(project_id) as session:
+            record_artifact(session, project_id, "screenplay", "writer", revised)
+        _stage_update(project_id, "SCRIPT_REVIEW", "已按人工意见修改，等待再次审核")
+
 async def scripting(state: ProductionState) -> dict:
     """剧本落库：Scene + Shot。"""
     project_id = state["project_id"]
@@ -163,8 +217,6 @@ async def scripting(state: ProductionState) -> dict:
         scene_ids: list[str] = []
         shot_ids: list[str] = []
         for sc in screenplay.get("scenes", []):
-            if settings.video_backend == "comfyui" and len(shot_ids) >= 3:
-                break
             index, scene_id = next_seq_and_id(session, Scene, project_id, "scene")
             session.add(
                 Scene(
@@ -177,8 +229,6 @@ async def scripting(state: ProductionState) -> dict:
             )
             scene_ids.append(scene_id)
             scene_shots = sc.get("shots", [])
-            if settings.video_backend == "comfyui":
-                scene_shots = scene_shots[:1]
             for sh in scene_shots:
                 s_index, shot_id = next_seq_and_id(session, Shot, project_id, "shot")
                 session.add(
@@ -244,78 +294,164 @@ async def asset_design(state: ProductionState) -> dict:
         characters, locations = create_assets_from_cards(
             session, project_id, char_cards, loc_cards
         )
-        job_ids = [
-            enqueue_character_turnaround(
-                session, project_id, character, character_design_prompt(character)
-            ).id
-            for character in characters
-        ]
-        job_ids += [
-            enqueue_location_refs(
-                session, project_id, location, location_design_prompt(location)
-            ).id
-            for location in locations
-        ]
-        project = session.get(Project, project_id)
-        auto_confirm = (project.mode if project is not None else "AUTO") == "AUTO"
-
-    statuses = await wait_for_jobs(project_id, job_ids) if job_ids else {}
-    asset_failed = [jid for jid, s in statuses.items() if s != "DONE"]
-
-    with _session(project_id) as session:
-        locked_characters: list[str] = []
-        locked_locations: list[str] = []
-        all_characters = list(
-            session.exec(
-                select(Character)
-                .where(Character.project_id == project_id)
-                .order_by(Character.index)
-            )
-        )
-        all_locations = list(
-            session.exec(
-                select(Location)
-                .where(Location.project_id == project_id)
-                .order_by(Location.index)
-            )
-        )
-        if auto_confirm:
-            for character in all_characters:
-                if character.status != "LOCKED":
-                    lock_character(session, character)
-                locked_characters.append(character.name)
-            for location in all_locations:
-                if location.status != "LOCKED":
-                    lock_location(session, location)
-                locked_locations.append(location.name)
-        linked = link_shots_to_assets(session, project_id)
-        record_artifact(
-            session,
-            project_id,
-            "asset_lock",
-            "producer",
-            {
-                "auto_confirm": auto_confirm,
-                "characters": locked_characters,
-                "locations": locked_locations,
-                "shot_character_links": linked,
-                "failed_asset_jobs": asset_failed,
-            },
-        )
-        character_ids = [c.id for c in all_characters]
-        location_ids = [loc.id for loc in all_locations]
+        character_ids = [c.id for c in characters]
+        location_ids = [loc.id for loc in locations]
 
     note = (
         f"导演圣经与生产计划就绪（每镜 {take_count} Take）；"
-        f"角色 {len(locked_characters)} 个 / 场景 {len(locked_locations)} 个"
+        f"角色 {len(characters)} 个 / 场景 {len(locations)} 个，等待人工审核"
     )
-    if asset_failed:
-        note += f"，{len(asset_failed)} 个资产出图失败（仍以文本锚点约束一致性）"
     return {
-        **_stage_update(project_id, "STORYBOARDING", note),
+        **_stage_update(project_id, "ASSET_REVIEW", note),
         "character_ids": character_ids,
         "location_ids": location_ids,
     }
+
+
+async def asset_review(state: ProductionState) -> dict:
+    """Durable human gate: approve characters & locations or revise from feedback."""
+    project_id = state["project_id"]
+    _stage_update(project_id, "ASSET_REVIEW", "资产已生成，等待人工审核")
+    model = get_text_model()
+    while True:
+        with _session(project_id) as session:
+            char_art = session.exec(
+                select(AgentArtifact)
+                .where(
+                    AgentArtifact.project_id == project_id,
+                    AgentArtifact.kind == "character_cards",
+                )
+                .order_by(AgentArtifact.index.desc())
+            ).first()
+            loc_art = session.exec(
+                select(AgentArtifact)
+                .where(
+                    AgentArtifact.project_id == project_id,
+                    AgentArtifact.kind == "location_cards",
+                )
+                .order_by(AgentArtifact.index.desc())
+            ).first()
+            if char_art is None or loc_art is None:
+                raise RuntimeError("资产产物不存在")
+            decisions = _latest_human_decisions(
+                session, project_id, "human_asset_review"
+            )
+            decision = decisions.get(char_art.id) or decisions.get(loc_art.id)
+            old_chars = list(char_art.data.get('characters', []))
+            old_locs = list(loc_art.data.get('locations', []))
+        if not decision:
+            await asyncio.sleep(1.0)
+            continue
+        if decision.get("decision") == "APPROVE":
+            with _session(project_id) as session:
+                characters = list(
+                    session.exec(
+                        select(Character)
+                        .where(Character.project_id == project_id)
+                        .order_by(Character.index)
+                    )
+                )
+                locations = list(
+                    session.exec(
+                        select(Location)
+                        .where(Location.project_id == project_id)
+                        .order_by(Location.index)
+                    )
+                )
+                for character in characters:
+                    if character.status != "LOCKED":
+                        lock_character(session, character)
+                for location in locations:
+                    if location.status != "LOCKED":
+                        lock_location(session, location)
+                link_shots_to_assets(session, project_id)
+                job_ids = [
+                    enqueue_character_turnaround(
+                        session, project_id, character, character_design_prompt(character)
+                    ).id
+                    for character in characters
+                ]
+                job_ids += [
+                    enqueue_location_refs(
+                        session, project_id, location, location_design_prompt(location)
+                    ).id
+                    for location in locations
+                ]
+                character_names = [character.name for character in characters]
+                location_names = [location.name for location in locations]
+            statuses = await wait_for_jobs(project_id, job_ids) if job_ids else {}
+            asset_failed = [jid for jid, s in statuses.items() if s != "DONE"]
+            with _session(project_id) as session:
+                for character in session.exec(
+                    select(Character).where(Character.project_id == project_id)
+                ):
+                    if character.status != "LOCKED":
+                        lock_character(session, character)
+                for location in session.exec(
+                    select(Location).where(Location.project_id == project_id)
+                ):
+                    if location.status != "LOCKED":
+                        lock_location(session, location)
+                link_shots_to_assets(session, project_id)
+                record_artifact(
+                    session,
+                    project_id,
+                    "asset_lock",
+                    "producer",
+                    {
+                        "characters": character_names,
+                        "locations": location_names,
+                        "failed_asset_jobs": asset_failed,
+                    },
+                )
+            note = "人工审核已通过资产"
+            if asset_failed:
+                note += f"，{len(asset_failed)} 个资产出图失败（仍以文本锚点约束一致性）"
+            return _stage_update(project_id, "STORYBOARDING", note)
+        feedback = str(decision.get("feedback") or "").strip()
+        if not feedback:
+            await asyncio.sleep(1.0)
+            continue
+        with _session(project_id) as session:
+            screenplay_artifact = _latest_artifact(session, project_id, "screenplay")
+            screenplay = screenplay_artifact.data if screenplay_artifact else {}
+            for char in session.exec(
+                select(Character).where(Character.project_id == project_id)
+            ):
+                session.delete(char)
+            for loc in session.exec(
+                select(Location).where(Location.project_id == project_id)
+            ):
+                session.delete(loc)
+            session.commit()
+        new_chars = await revise_character_cards(model, screenplay, old_chars, feedback)
+        new_locs = await revise_location_cards(model, screenplay, old_locs, feedback)
+        with _session(project_id) as session:
+            record_artifact(
+                session, project_id, "character_cards", "character_designer",
+                {"characters": new_chars},
+            )
+            record_artifact(
+                session, project_id, "location_cards", "art_director",
+                {"locations": new_locs},
+            )
+            characters, locations = create_assets_from_cards(
+                session, project_id, new_chars, new_locs
+            )
+            job_ids = [
+                enqueue_character_turnaround(
+                    session, project_id, c, character_design_prompt(c)
+                ).id
+                for c in characters
+            ]
+            job_ids += [
+                enqueue_location_refs(
+                    session, project_id, loc, location_design_prompt(loc)
+                ).id
+                for loc in locations
+            ]
+        await wait_for_jobs(project_id, job_ids) if job_ids else None
+        _stage_update(project_id, "ASSET_REVIEW", "已按人工意见修改资产，等待再次审核")
 
 
 async def storyboarding(state: ProductionState) -> dict:
@@ -360,6 +496,10 @@ async def storyboarding(state: ProductionState) -> dict:
         raise RuntimeError(f"分镜生成全部失败: {failed}")
 
     with _session(project_id) as session:
+        record_artifact(
+            session, project_id, "storyboard_candidates", "prompt_engineer",
+            {"shot_count": len(_shots_of_project(session, project_id))},
+        )
         for shot in _shots_of_project(session, project_id):
             candidates = list(
                 session.exec(
@@ -375,15 +515,120 @@ async def storyboarding(state: ProductionState) -> dict:
                 continue
             if settings.image_backend == "mock" or len(candidates) == 1:
                 sb_id = candidates[0].id
-            else:
-                sb_id = await select_storyboard(
-                    model,
-                    shot.title,
-                    bible,
-                    [{"id": c.id, "prompt": c.prompt} for c in candidates],
+                select_and_lock_storyboard(session, project_id, shot, sb_id)
+    return _stage_update(project_id, "STORYBOARD_REVIEW", "分镜候选已生成，等待人工审核")
+
+
+async def storyboard_review(state: ProductionState) -> dict:
+    """Durable human gate: approve storyboards or revise from feedback."""
+    project_id = state["project_id"]
+    _stage_update(project_id, "STORYBOARD_REVIEW", "分镜候选已生成，等待人工审核")
+    model = get_text_model()
+    while True:
+        with _session(project_id) as session:
+            shots = _shots_of_project(session, project_id)
+            sb_art = session.exec(
+                select(AgentArtifact)
+                .where(
+                    AgentArtifact.project_id == project_id,
+                    AgentArtifact.kind == "storyboard_candidates",
                 )
-            select_and_lock_storyboard(session, project_id, shot, sb_id)
-    return _stage_update(project_id, "VIDEO_GENERATION", "分镜已锁定")
+                .order_by(AgentArtifact.index.desc())
+            ).first()
+            if sb_art is None:
+                await asyncio.sleep(1.0)
+                continue
+            decision = _latest_human_decisions(
+                session, project_id, "human_storyboard_review"
+            ).get(sb_art.id)
+        if not decision:
+            await asyncio.sleep(1.0)
+            continue
+        if decision.get("decision") == "APPROVE":
+            with _session(project_id) as session:
+                bible = _latest_artifact(session, project_id, "director_bible")
+                for shot in _shots_of_project(session, project_id):
+                    candidates = list(
+                        session.exec(
+                            select(Storyboard)
+                            .where(
+                                Storyboard.project_id == project_id,
+                                Storyboard.shot_id == shot.id,
+                            )
+                            .order_by(Storyboard.index)
+                        )
+                    )
+                    if not candidates:
+                        continue
+                    if settings.image_backend == "mock" or len(candidates) == 1:
+                        sb_id = candidates[0].id
+                    else:
+                        sb_id = await select_storyboard(
+                            model,
+                            shot.title,
+                            bible,
+                            [{"id": c.id, "prompt": c.prompt} for c in candidates],
+                        )
+                    select_and_lock_storyboard(session, project_id, shot, sb_id)
+            return _stage_update(project_id, "VIDEO_GENERATION", "人工审核已通过分镜")
+        feedback = str(decision.get("feedback") or "").strip()
+        if not feedback:
+            await asyncio.sleep(1.0)
+            continue
+        with _session(project_id) as session:
+            bible = _latest_artifact(session, project_id, "director_bible")
+            shots = _shots_of_project(session, project_id)
+            job_ids = []
+            for shot in shots:
+                scene = session.get(Scene, shot.scene_id) if shot.scene_id else None
+                assets = shot_asset_blocks(session, project_id, shot)
+                old_sb = list(
+                    session.exec(
+                        select(Storyboard)
+                        .where(
+                            Storyboard.project_id == project_id,
+                            Storyboard.shot_id == shot.id,
+                        )
+                    )
+                )
+                old_prompt = old_sb[0].prompt if old_sb else shot.description
+                new_prompt = await revise_storyboard_prompts(
+                    model,
+                    {
+                        "title": shot.title,
+                        "description": shot.description,
+                        "framing": shot.framing,
+                        "camera_motion": shot.camera_motion,
+                        "duration_target": shot.duration_target,
+                    },
+                    scene.description if scene else "",
+                    bible,
+                    old_prompt,
+                    feedback,
+                    characters=assets["characters"],
+                    location=assets["location"],
+                )
+                _compliance_guard(project_id, new_prompt, "pipeline.storyboard.revision")
+                job = enqueue_storyboard_job(
+                    session,
+                    project_id,
+                    shot.id,
+                    new_prompt,
+                    count=STORYBOARD_CANDIDATES,
+                    references=assets["reference_images"],
+                )
+                job_ids.append(job.id)
+            record_artifact(
+                session,
+                project_id,
+                "storyboard_candidates",
+                "prompt_engineer",
+                {"revision_feedback": feedback},
+            )
+        await wait_for_jobs(project_id, job_ids)
+        _stage_update(
+            project_id, "STORYBOARD_REVIEW", "已按人工意见修改分镜，等待再次审核"
+        )
 
 
 async def video_generation(state: ProductionState) -> dict:
@@ -533,6 +778,41 @@ async def reviewing(state: ProductionState) -> dict:
     }
 
 
+async def human_take_review(state: ProductionState) -> dict:
+    """Pause until a human approves one generated Take for every shot."""
+    project_id = state["project_id"]
+    _stage_update(
+        project_id,
+        "HUMAN_TAKE_REVIEW",
+        "Take 已生成，等待人工逐镜复审；可通过或填写意见后打回重拍",
+    )
+    while True:
+        all_approved = True
+        with _session(project_id) as session:
+            decisions = _latest_human_decisions(
+                session, project_id, "human_take_review"
+            )
+            for shot in _shots_of_project(session, project_id):
+                takes = takes_of_shot(session, project_id, shot.id)
+                approved = next(
+                    (
+                        take
+                        for take in reversed(takes)
+                        if decisions.get(take.id, {}).get("decision") == "APPROVE"
+                    ),
+                    None,
+                )
+                if approved is None:
+                    all_approved = False
+                    continue
+                shot.selected_take_id = approved.id
+                shot.status = "HUMAN_APPROVED"
+                session.add(shot)
+            session.commit()
+        if all_approved:
+            return _stage_update(project_id, "TAKE_SELECTION", "全部镜头已通过人工复审")
+        await asyncio.sleep(1.0)
+
 def _route_after_review(state: ProductionState) -> str:
     if state.get("needs_retake_shot_ids"):
         return "video_generation"
@@ -549,6 +829,7 @@ async def take_selection(state: ProductionState) -> dict:
     """每个镜头选入 KEEP 且评分最高的 Take；无 KEEP 时按最高分兜底。"""
     project_id = state["project_id"]
     with _session(project_id) as session:
+        human_decisions = _latest_human_decisions(session, project_id, "human_take_review")
         reviews = {
             a.subject_id: a.data
             for a in session.exec(
@@ -566,8 +847,9 @@ async def take_selection(state: ProductionState) -> dict:
 
             def rank(take: Take) -> tuple[int, float]:
                 review = reviews.get(take.id, {})
-                is_keep = 1 if review.get("decision") == "KEEP" else 0
-                return (is_keep, _mean_score(review))
+                human_keep = 2 if human_decisions.get(take.id, {}).get("decision") == "APPROVE" else 0
+                auto_keep = 1 if review.get("decision") == "KEEP" else 0
+                return (human_keep + auto_keep, _mean_score(review))
 
             best = max(takes, key=rank)
             shot.selected_take_id = best.id
@@ -653,27 +935,31 @@ async def complete(state: ProductionState) -> dict:
 def build_film_graph():
     graph = StateGraph(ProductionState)
     graph.add_node("ideation", ideation)
+    graph.add_node("script_review", script_review)
     graph.add_node("scripting", scripting)
     graph.add_node("asset_design", asset_design)
+    graph.add_node("asset_review", asset_review)
     graph.add_node("storyboarding", storyboarding)
+    graph.add_node("storyboard_review", storyboard_review)
     graph.add_node("video_generation", video_generation)
     graph.add_node("reviewing", reviewing)
+    graph.add_node("human_take_review", human_take_review)
     graph.add_node("take_selection", take_selection)
     graph.add_node("editing", editing)
     graph.add_node("rendering", rendering)
     graph.add_node("complete", complete)
 
     graph.add_edge(START, "ideation")
-    graph.add_edge("ideation", "scripting")
+    graph.add_edge("ideation", "script_review")
+    graph.add_edge("script_review", "scripting")
     graph.add_edge("scripting", "asset_design")
-    graph.add_edge("asset_design", "storyboarding")
-    graph.add_edge("storyboarding", "video_generation")
+    graph.add_edge("asset_design", "asset_review")
+    graph.add_edge("asset_review", "storyboarding")
+    graph.add_edge("storyboarding", "storyboard_review")
+    graph.add_edge("storyboard_review", "video_generation")
     graph.add_edge("video_generation", "reviewing")
-    graph.add_conditional_edges(
-        "reviewing",
-        _route_after_review,
-        {"video_generation": "video_generation", "take_selection": "take_selection"},
-    )
+    graph.add_edge("reviewing", "human_take_review")
+    graph.add_edge("human_take_review", "take_selection")
     graph.add_edge("take_selection", "editing")
     graph.add_edge("editing", "rendering")
     graph.add_edge("rendering", "complete")
@@ -703,16 +989,15 @@ def build_resume_graph():
     graph = StateGraph(ProductionState)
     graph.add_node("reviewing", reviewing)
     graph.add_node("video_generation", video_generation)
+    graph.add_node("human_take_review", human_take_review)
     graph.add_node("take_selection", take_selection)
     graph.add_node("editing", editing)
     graph.add_node("rendering", rendering)
     graph.add_node("complete", complete)
     graph.add_edge(START, "reviewing")
-    graph.add_conditional_edges(
-        "reviewing",
-        _route_after_review,
-        {"video_generation": "video_generation", "take_selection": "take_selection"},
-    )
+    graph.add_edge("reviewing", "human_take_review")
+    graph.add_edge("human_take_review", "take_selection")
+
     graph.add_edge("video_generation", "reviewing")
     graph.add_edge("take_selection", "editing")
     graph.add_edge("editing", "rendering")

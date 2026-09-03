@@ -3,10 +3,15 @@
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from ..db import get_engine, project_session
-from ..domain import AgentArtifact, GenerationJob, Project
+from ..agents import get_text_model
+from ..agents.film_agents import revise_video_prompt
+from ..compliance import compliance_gate
+from ..domain import AgentArtifact, GenerationJob, Project, Shot, Storyboard, Take
+from ..jobs import generation_queue
 from ..graph.film_graph import resume_film_pipeline, run_film_pipeline
 from ..repositories import next_seq_and_id
 from ..services.generation import record_artifact
@@ -15,6 +20,20 @@ router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["pipeline"])
 
 ACTIVE_STATUSES = {"PENDING", "RUNNING"}
 
+class HumanReviewIn(BaseModel):
+    decision: str
+    feedback: str = ""
+
+
+def _latest_artifact(
+    session: Session, project_id: str, kind: str, subject_id: str | None = None
+) -> AgentArtifact | None:
+    stmt = select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id, AgentArtifact.kind == kind
+    )
+    if subject_id is not None:
+        stmt = stmt.where(AgentArtifact.subject_id == subject_id)
+    return session.exec(stmt.order_by(AgentArtifact.index.desc())).first()
 
 def _job_dict(job: GenerationJob) -> dict:
     return {
@@ -143,6 +162,306 @@ async def _run_pipeline(project_id: str, job_id: str, resume: bool = False) -> N
                 session.add(job)
                 session.commit()
 
+@router.get("/human-review")
+def human_review_state(
+    project_id: str, session: Session = Depends(project_session)
+):
+    project = session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    screenplay = _latest_artifact(session, project_id, "screenplay")
+    script_decision = (
+        _latest_artifact(session, project_id, "human_script_review", screenplay.id)
+        if screenplay else None
+    )
+    char_cards = _latest_artifact(session, project_id, "character_cards")
+    loc_cards = _latest_artifact(session, project_id, "location_cards")
+    asset_decisions = {}
+    for artifact in session.exec(
+        select(AgentArtifact)
+        .where(
+            AgentArtifact.project_id == project_id,
+            AgentArtifact.kind == "human_asset_review",
+        )
+        .order_by(AgentArtifact.index)
+    ):
+        if artifact.subject_id:
+            asset_decisions[artifact.subject_id] = artifact.data
+    sb_candidates = _latest_artifact(session, project_id, "storyboard_candidates")
+    sb_decisions = {}
+    for artifact in session.exec(
+        select(AgentArtifact)
+        .where(
+            AgentArtifact.project_id == project_id,
+            AgentArtifact.kind == "human_storyboard_review",
+        )
+        .order_by(AgentArtifact.index)
+    ):
+        if artifact.subject_id:
+            sb_decisions[artifact.subject_id] = artifact.data
+    take_decisions = {}
+    for artifact in session.exec(
+        select(AgentArtifact)
+        .where(
+            AgentArtifact.project_id == project_id,
+            AgentArtifact.kind == "human_take_review",
+        )
+        .order_by(AgentArtifact.index)
+    ):
+        if artifact.subject_id:
+            take_decisions[artifact.subject_id] = artifact.data
+    characters = []
+    from ..domain import Character, Location
+    for c in session.exec(
+        select(Character)
+        .where(Character.project_id == project_id)
+        .order_by(Character.index)
+    ):
+        characters.append({
+            "id": c.id,
+            "name": c.name,
+            "gender": c.gender,
+            "age_range": c.age_range,
+            "role": c.role,
+            "description": c.description,
+            "appearance": c.appearance,
+            "costume": c.costume,
+            "personality": c.personality,
+            "visual_anchors": c.visual_anchors,
+            "immutable_traits": c.immutable_traits,
+            "status": c.status,
+        })
+    locations = []
+    for loc in session.exec(
+        select(Location)
+        .where(Location.project_id == project_id)
+        .order_by(Location.index)
+    ):
+        locations.append({
+            "id": loc.id,
+            "name": loc.name,
+            "description": loc.description,
+            "visual_style": loc.visual_style,
+            "time_of_day_default": loc.time_of_day_default,
+            "materials": loc.materials,
+            "colors": loc.colors,
+            "visual_cues": loc.visual_cues,
+            "immutable_elements": loc.immutable_elements,
+            "lighting_rules": loc.lighting_rules,
+            "status": loc.status,
+        })
+    storyboards = []
+    from ..domain import Storyboard
+    for sb in session.exec(
+        select(Storyboard)
+        .where(Storyboard.project_id == project_id)
+        .order_by(Storyboard.index)
+    ):
+        storyboard_shot = session.get(Shot, sb.shot_id)
+        image_path = sb.image_path.replace('\\', '/')
+        storyboards.append({
+            "id": sb.id,
+            "shot_id": sb.shot_id,
+            "prompt": sb.prompt,
+            "image_path": sb.image_path,
+            "media_url": f"/media/{project_id}/{image_path}",
+            "status": sb.status,
+            "is_selected": bool(
+                storyboard_shot and storyboard_shot.storyboard_id == sb.id
+            ),
+            "is_locked": sb.status == "LOCKED",
+        })
+    return {
+        "stage": project.status,
+        "screenplay_id": screenplay.id if screenplay else None,
+        "screenplay": screenplay.data if screenplay else None,
+        "script_decision": script_decision.data if script_decision else None,
+        "character_cards": char_cards.data if char_cards else None,
+        "location_cards": loc_cards.data if loc_cards else None,
+        "asset_decisions": asset_decisions,
+        "characters": characters,
+        "locations": locations,
+        "storyboard_candidates_id": sb_candidates.id if sb_candidates else None,
+        "storyboard_decisions": sb_decisions,
+        "storyboards": storyboards,
+        "take_decisions": take_decisions,
+    }
+
+
+@router.post("/script-review")
+def submit_script_review(
+    project_id: str,
+    body: HumanReviewIn,
+    session: Session = Depends(project_session),
+):
+    decision = body.decision.upper()
+    if decision not in {"APPROVE", "REVISE"}:
+        raise HTTPException(status_code=422, detail="decision must be APPROVE or REVISE")
+    if decision == "REVISE" and not body.feedback.strip():
+        raise HTTPException(status_code=422, detail="修改剧本时必须填写审核意见")
+    screenplay = _latest_artifact(session, project_id, "screenplay")
+    if screenplay is None:
+        raise HTTPException(status_code=409, detail="尚无可审核剧本")
+    artifact = record_artifact(
+        session,
+        project_id,
+        "human_script_review",
+        "human",
+        {"decision": decision, "feedback": body.feedback.strip()},
+        screenplay.id,
+    )
+    return {"ok": True, "review_id": artifact.id, "decision": decision}
+
+
+@router.post("/asset-review")
+def submit_asset_review(
+    project_id: str,
+    body: HumanReviewIn,
+    session: Session = Depends(project_session),
+):
+    decision = body.decision.upper()
+    if decision not in {"APPROVE", "REVISE"}:
+        raise HTTPException(status_code=422, detail="decision must be APPROVE or REVISE")
+    if decision == "REVISE" and not body.feedback.strip():
+        raise HTTPException(status_code=422, detail="修改资产时必须填写审核意见")
+    char_cards = _latest_artifact(session, project_id, "character_cards")
+    loc_cards = _latest_artifact(session, project_id, "location_cards")
+    if char_cards is None or loc_cards is None:
+        raise HTTPException(status_code=409, detail="尚无可审核资产")
+    artifact = record_artifact(
+        session,
+        project_id,
+        "human_asset_review",
+        "human",
+        {"decision": decision, "feedback": body.feedback.strip()},
+        char_cards.id,
+    )
+    record_artifact(
+        session,
+        project_id,
+        "human_asset_review",
+        "human",
+        {"decision": decision, "feedback": body.feedback.strip()},
+        loc_cards.id,
+    )
+    return {"ok": True, "review_id": artifact.id, "decision": decision}
+
+
+@router.post("/storyboard-review")
+def submit_storyboard_review(
+    project_id: str,
+    body: HumanReviewIn,
+    session: Session = Depends(project_session),
+):
+    decision = body.decision.upper()
+    if decision not in {"APPROVE", "REVISE"}:
+        raise HTTPException(status_code=422, detail="decision must be APPROVE or REVISE")
+    if decision == "REVISE" and not body.feedback.strip():
+        raise HTTPException(status_code=422, detail="修改分镜时必须填写审核意见")
+    sb_candidates = _latest_artifact(session, project_id, "storyboard_candidates")
+    if sb_candidates is None:
+        raise HTTPException(status_code=409, detail="尚无可审核分镜")
+    artifact = record_artifact(
+        session,
+        project_id,
+        "human_storyboard_review",
+        "human",
+        {"decision": decision, "feedback": body.feedback.strip()},
+        sb_candidates.id,
+    )
+    return {"ok": True, "review_id": artifact.id, "decision": decision}
+
+
+@router.post("/takes/{take_id}/human-review", status_code=202)
+async def submit_take_review(
+    project_id: str,
+    take_id: str,
+    body: HumanReviewIn,
+    session: Session = Depends(project_session),
+):
+    decision = body.decision.upper()
+    if decision not in {"APPROVE", "RETAKE"}:
+        raise HTTPException(status_code=422, detail="decision must be APPROVE or RETAKE")
+    if decision == "RETAKE" and not body.feedback.strip():
+        raise HTTPException(status_code=422, detail="打回重拍时必须填写具体修改方向")
+    take = session.get(Take, take_id)
+    if take is None or take.project_id != project_id:
+        raise HTTPException(status_code=404, detail="take not found")
+    shot = session.get(Shot, take.shot_id)
+    if shot is None:
+        raise HTTPException(status_code=404, detail="shot not found")
+
+    review = record_artifact(
+        session,
+        project_id,
+        "human_take_review",
+        "human",
+        {"decision": decision, "feedback": body.feedback.strip(), "shot_id": shot.id},
+        take.id,
+    )
+    if decision == "APPROVE":
+        shot.selected_take_id = take.id
+        shot.status = "HUMAN_APPROVED"
+        session.add(shot)
+        session.commit()
+        return {"ok": True, "review_id": review.id, "decision": decision}
+
+    active = session.exec(
+        select(GenerationJob).where(
+            GenerationJob.project_id == project_id,
+            GenerationJob.shot_id == shot.id,
+            GenerationJob.job_type == "VIDEO",
+            GenerationJob.status.in_(ACTIVE_STATUSES),  # type: ignore[arg-type]
+        )
+    ).first()
+    if active is not None:
+        raise HTTPException(status_code=409, detail=f"该镜头已有生成任务: {active.id}")
+    screenplay = _latest_artifact(session, project_id, "screenplay")
+    storyboard = session.get(Storyboard, shot.storyboard_id) if shot.storyboard_id else None
+    prompt = await revise_video_prompt(
+        get_text_model(),
+        screenplay.data if screenplay else {},
+        {
+            "id": shot.id,
+            "title": shot.title,
+            "description": shot.description,
+            "duration": shot.duration_target,
+            "framing": shot.framing,
+            "camera_motion": shot.camera_motion,
+        },
+        storyboard.prompt if storyboard else "",
+        take.prompt,
+        body.feedback.strip(),
+    )
+    compliance_gate.check_or_raise(prompt, "take.human_retake", project_id)
+    index, job_id = next_seq_and_id(session, GenerationJob, project_id, "job")
+    job = GenerationJob(
+        id=job_id,
+        project_id=project_id,
+        shot_id=shot.id,
+        index=index,
+        job_type="VIDEO",
+        priority="HIGH",
+        payload={
+            "shot_id": shot.id,
+            "prompt": prompt,
+            "human_feedback": body.feedback.strip(),
+            "replaces_take_id": take.id,
+        },
+    )
+    session.add(job)
+    shot.status = "GENERATING"
+    session.add(shot)
+    session.commit()
+    session.refresh(job)
+    generation_queue.notify()
+    return {
+        "ok": True,
+        "review_id": review.id,
+        "decision": decision,
+        "job": job.model_dump(),
+        "revised_prompt": prompt,
+    }
 
 @router.get("/pipeline")
 def get_pipeline(project_id: str, session: Session = Depends(project_session)):

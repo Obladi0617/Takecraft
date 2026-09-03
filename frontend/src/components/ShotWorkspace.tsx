@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   API_BASE,
   fetchGenerationJobs,
+  fetchHumanReview,
   fetchShots,
   fetchStoryboards,
   fetchTakes,
@@ -11,6 +12,7 @@ import {
   lockStoryboard,
   selectStoryboard,
   selectTake,
+  submitTakeReview,
   takeMediaUrl,
   uploadTake,
 } from '../api/client'
@@ -28,6 +30,7 @@ export default function ShotWorkspace() {
   const [sbPrompt, setSbPrompt] = useState('')
   const [sbCount, setSbCount] = useState(4)
   const [forceAsk, setForceAsk] = useState(false)
+  const [reviewFeedback, setReviewFeedback] = useState<Record<string, string>>({})
 
   const { data: shots } = useQuery({
     queryKey: ['shots', projectId],
@@ -58,6 +61,23 @@ export default function ShotWorkspace() {
     refetchInterval: shotJobsActive ? 1500 : false,
   })
 
+  const { data: humanReview } = useQuery({
+    queryKey: ['human-review', projectId],
+    queryFn: () => fetchHumanReview(projectId),
+    refetchInterval: 1200,
+  })
+
+  const humanTakeReview = useMutation({
+    mutationFn: ({ takeId, decision }: { takeId: string; decision: 'APPROVE' | 'RETAKE' }) =>
+      submitTakeReview(projectId, takeId, decision, reviewFeedback[takeId] ?? ''),
+    onSuccess: (_, variables) => {
+      setReviewFeedback((current) => ({ ...current, [variables.takeId]: '' }))
+      queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['jobs', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['shots', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['takes', projectId, shotId] })
+    },
+  })
   const upload = useMutation({
     mutationFn: (file: File) => uploadTake(projectId, shotId!, file, prompt),
     onSuccess: () => {
@@ -285,13 +305,45 @@ export default function ShotWorkspace() {
               key={take.id}
               className={`take-card ${shot.selected_take_id === take.id ? 'selected' : ''}`}
             >
-              <video src={takeMediaUrl(take)} preload="metadata" muted />
+              <video src={takeMediaUrl(take)} preload="metadata" controls />
               <div className="take-meta">
                 <strong>{take.id}</strong>
                 {take.duration != null && <span>{take.duration.toFixed(1)}s</span>}
                 <span className="muted">{take.model}</span>
               </div>
               {take.prompt && <p className="take-prompt">{take.prompt}</p>}
+              {humanReview?.stage === 'HUMAN_TAKE_REVIEW' && (
+                <div className="take-human-review">
+                  <textarea
+                    placeholder="不合格时填写：哪里不好、希望怎样调整"
+                    value={reviewFeedback[take.id] ?? ''}
+                    onChange={(event) =>
+                      setReviewFeedback((current) => ({
+                        ...current,
+                        [take.id]: event.target.value,
+                      }))
+                    }
+                  />
+                  <div className="human-review-actions">
+                    <button
+                      className={humanReview.take_decisions[take.id]?.decision === 'APPROVE' ? 'primary' : ''}
+                      disabled={humanTakeReview.isPending}
+                      onClick={() => humanTakeReview.mutate({ takeId: take.id, decision: 'APPROVE' })}
+                    >
+                      人工通过
+                    </button>
+                    <button
+                      disabled={humanTakeReview.isPending || !(reviewFeedback[take.id] ?? '').trim()}
+                      onClick={() => humanTakeReview.mutate({ takeId: take.id, decision: 'RETAKE' })}
+                    >
+                      按意见打回重拍
+                    </button>
+                  </div>
+                  {humanReview.take_decisions[take.id]?.feedback && (
+                    <p className="muted">上次意见：{humanReview.take_decisions[take.id].feedback}</p>
+                  )}
+                </div>
+              )}
               <button
                 className={shot.selected_take_id === take.id ? 'primary' : ''}
                 onClick={() => select.mutate(take.id)}

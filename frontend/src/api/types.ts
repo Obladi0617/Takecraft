@@ -206,3 +206,103 @@ export interface AssetBundle {
   characters: Character[]
   locations: Location[]
 }
+export interface HumanDecision {
+  decision: 'APPROVE' | 'REVISE' | 'RETAKE'
+  feedback: string
+  shot_id?: string
+}
+
+export interface CharacterCard {
+  name: string
+  gender?: string | null
+  age_range?: string | null
+  role?: string
+  description?: string
+  appearance?: string
+  costume?: string
+  personality?: string
+  visual_anchors?: string[]
+  immutable_traits?: string[]
+}
+
+export interface LocationCard {
+  name: string
+  scene_title?: string
+  description?: string
+  visual_style?: string
+  time_of_day_default?: string
+  materials?: string[]
+  colors?: string[]
+  visual_cues?: string[]
+  immutable_elements?: string[]
+  lighting_rules?: string[]
+}
+
+export interface CharacterInfo {
+  id: string
+  name: string
+  gender: string | null
+  age_range: string | null
+  role: string
+  description: string
+  appearance: string
+  costume: string
+  personality: string
+  visual_anchors: string[]
+  immutable_traits: string[]
+  status: string
+}
+
+export interface LocationInfo {
+  id: string
+  name: string
+  description: string
+  visual_style: string
+  time_of_day_default: string
+  materials: string[]
+  colors: string[]
+  visual_cues: string[]
+  immutable_elements: string[]
+  lighting_rules: string[]
+  status: string
+}
+
+export interface StoryboardInfo {
+  id: string
+  shot_id: string
+  prompt: string
+  image_path: string
+  media_url: string
+  status: string
+  is_selected: boolean
+  is_locked: boolean
+}
+
+export interface HumanReviewState {
+  stage: string
+  screenplay_id: string | null
+  screenplay: {
+    logline?: string
+    scenes?: Array<{
+      title?: string
+      description?: string
+      shots?: Array<{
+        title?: string
+        description?: string
+        framing?: string
+        camera_motion?: string
+        duration?: number
+      }>
+    }>
+  } | null
+  script_decision: HumanDecision | null
+  character_cards: { characters: CharacterCard[] } | null
+  location_cards: { locations: LocationCard[] } | null
+  asset_decisions: Record<string, HumanDecision>
+  characters: CharacterInfo[]
+  locations: LocationInfo[]
+  storyboard_candidates_id: string | null
+  storyboard_decisions: Record<string, HumanDecision>
+  storyboards: StoryboardInfo[]
+  take_decisions: Record<string, HumanDecision>
+}

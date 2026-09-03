@@ -13,7 +13,16 @@ SCREENPLAY_SYSTEM = """你是资深短片编剧。根据一句话创意输出剧
 {"logline": "...", "scenes": [{"title": "...", "description": "...", "dramatic_goal": "...",
 "shots": [{"title": "...", "description": "...", "framing": "WIDE|MEDIUM|CLOSE_UP|EXTREME_WIDE",
 "camera_motion": "STATIC|SLOW_PUSH_IN|PAN_LEFT|TILT_UP|HANDHELD", "duration": 3.0}]}]}
-要求：2~3 个场景，每场 2~3 个镜头，duration 2~5 秒，中文。只输出 JSON。"""
+要求：场景数和每场镜头数由叙事需要决定，不设固定镜头数量；每个镜头必须独立给出合理的
+duration，建议 5~12 秒，并让总时长和节奏符合故事；中文。只输出 JSON。"""
+
+REVISE_SCREENPLAY_SYSTEM = """你是资深短片编剧。根据人工审核意见修改现有剧本 JSON。
+保持未被意见点名的内容稳定；可调整场景、镜头数量和每镜 duration。输出结构必须与原剧本一致，
+每个镜头必须包含 title、description、framing、camera_motion、duration。只输出完整 JSON。"""
+
+REVISE_VIDEO_PROMPT_SYSTEM = """你是视频生成提示词导演。结合剧本、当前镜头、已锁定分镜、
+上一版视频提示词和人工复审意见，重写仅用于该镜头重拍的视频生成提示词。必须具体落实人工指出的
+问题，同时保留角色/场景一致性与镜头叙事意图。输出 {"prompt":"..."}，中文，只输出 JSON。"""
 
 BIBLE_SYSTEM = """你是导演。基于剧本输出导演圣经 JSON，结构：
 {"visual_style": "...", "color_rules": ["..."], "camera_rules": ["..."],
@@ -38,7 +47,7 @@ LOCATION_SYSTEM = """你是美术指导。从剧本中提取主要场景并输�
 "visual_style": "...", "time_of_day_default": "清晨|白天|黄昏|夜晚",
 "materials": ["..."], "colors": ["..."], "visual_cues": ["..."],
 "immutable_elements": ["..."], "lighting_rules": ["..."]}]}
-要求：最多 3 个主要场景；scene_title 必须与剧本里的场景标题一致；colors 用具体色名；
+要求：提取剧本需要的主要场景，不固定为 3 个；scene_title 必须与剧本里的场景标题一致；colors 用具体色名；
 visual_cues 是 2~4 条具体可视锚点（例：红色招牌、绿色长椅）；immutable_elements 为跨镜头必须
 保持一致的固定元素 2~4 条；中文。只输出 JSON。"""
 
@@ -98,6 +107,104 @@ async def writer_draft(model: TextModel, idea: str) -> dict:
         model, SCREENPLAY_SYSTEM, f"一句话创意：{idea}", ("logline", "scenes")
     )
 
+async def revise_screenplay(
+    model: TextModel, idea: str, screenplay: dict, feedback: str
+) -> dict:
+    return await _ask_json(
+        model,
+        REVISE_SCREENPLAY_SYSTEM,
+        f"创意：{idea}\n现有剧本：{json.dumps(screenplay, ensure_ascii=False)}\n"
+        f"人工审核意见：{feedback}",
+        ("logline", "scenes"),
+    )
+
+
+async def revise_video_prompt(
+    model: TextModel,
+    screenplay: dict,
+    shot: dict,
+    storyboard_prompt: str,
+    previous_prompt: str,
+    feedback: str,
+) -> str:
+    result = await _ask_json(
+        model,
+        REVISE_VIDEO_PROMPT_SYSTEM,
+        f"剧本：{json.dumps(screenplay, ensure_ascii=False)}\n"
+        f"镜头：{json.dumps(shot, ensure_ascii=False)}\n"
+        f"已锁定分镜：{storyboard_prompt}\n上一版提示词：{previous_prompt}\n"
+        f"人工复审意见：{feedback}",
+        ("prompt",),
+    )
+    return str(result["prompt"])
+
+
+REVISE_CHARACTER_SYSTEM = """你是角色设计师。根据人工审核意见修改现有角色卡 JSON。
+保持未被意见点名的内容稳定；可调整角色数量、外观、服装等。输出结构必须与原角色卡一致，
+每个角色必须包含 name、gender、age_range、role、description、appearance、costume、
+personality、visual_anchors、immutable_traits。只输出完整 JSON。"""
+
+REVISE_LOCATION_SYSTEM = """你是美术指导。根据人工审核意见修改现有场景卡 JSON。
+保持未被意见点名的内容稳定；可调整场景数量、风格、材质等。输出结构必须与原场景卡一致，
+每个场景必须包含 name、scene_title、description、visual_style、time_of_day_default、
+materials、colors、visual_cues、immutable_elements、lighting_rules。只输出完整 JSON。"""
+
+REVISE_STORYBOARD_SYSTEM = """你是提示词工程师。根据人工审核意见修改现有分镜提示词。
+必须具体落实人工指出的问题，同时保留角色/场景一致性与镜头叙事意图。
+输出 {"prompt": "..."}，中文，400 字以内。只输出 JSON。"""
+
+
+async def revise_character_cards(
+    model: TextModel, screenplay: dict, characters: list[dict], feedback: str
+) -> list[dict]:
+    result = await _ask_json(
+        model,
+        REVISE_CHARACTER_SYSTEM,
+        f"剧本：{json.dumps(screenplay, ensure_ascii=False)}\n"
+        f"现有角色卡：{json.dumps(characters, ensure_ascii=False)}\n"
+        f"人工审核意见：{feedback}",
+        ("characters",),
+    )
+    cards = result.get("characters")
+    return [c for c in cards if isinstance(c, dict)] if isinstance(cards, list) else []
+
+
+async def revise_location_cards(
+    model: TextModel, screenplay: dict, locations: list[dict], feedback: str
+) -> list[dict]:
+    result = await _ask_json(
+        model,
+        REVISE_LOCATION_SYSTEM,
+        f"剧本：{json.dumps(screenplay, ensure_ascii=False)}\n"
+        f"现有场景卡：{json.dumps(locations, ensure_ascii=False)}\n"
+        f"人工审核意见：{feedback}",
+        ("locations",),
+    )
+    cards = result.get("locations")
+    return [c for c in cards if isinstance(c, dict)] if isinstance(cards, list) else []
+
+
+async def revise_storyboard_prompts(
+    model: TextModel,
+    shot_spec: dict,
+    scene_desc: str,
+    bible: dict,
+    previous_prompt: str,
+    feedback: str,
+    characters: list[str] | None = None,
+    location: str = "",
+) -> str:
+    result = await _ask_json(
+        model,
+        REVISE_STORYBOARD_SYSTEM,
+        f"镜头：{json.dumps(shot_spec, ensure_ascii=False)}\n"
+        f"场景：{scene_desc}\n"
+        f"导演圣经：{json.dumps(bible, ensure_ascii=False)}\n"
+        f"上一版提示词：{previous_prompt}\n"
+        f"人工审核意见：{feedback}",
+        ("prompt",),
+    )
+    return str(result.get("prompt", previous_prompt))
 
 async def director_bible(model: TextModel, idea: str, screenplay: dict) -> str:
     try:

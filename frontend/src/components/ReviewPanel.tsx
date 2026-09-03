@@ -1,0 +1,267 @@
+import { useState } from 'react'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  API_BASE,
+  fetchHumanReview,
+  submitScriptReview,
+  submitAssetReview,
+  submitStoryboardReview,
+} from '../api/client'
+import { useAppStore } from '../stores/app'
+
+export default function ReviewPanel() {
+  const projectId = useAppStore((s) => s.projectId)!
+  const queryClient = useQueryClient()
+  const [scriptFeedback, setScriptFeedback] = useState('')
+  const [assetFeedback, setAssetFeedback] = useState('')
+  const [storyboardFeedback, setStoryboardFeedback] = useState('')
+
+  const { data: humanReview } = useQuery({
+    queryKey: ['human-review', projectId],
+    queryFn: () => fetchHumanReview(projectId),
+    refetchInterval: 1200,
+  })
+
+  const scriptReview = useMutation({
+    mutationFn: (decision: 'APPROVE' | 'REVISE') =>
+      submitScriptReview(projectId, decision, scriptFeedback),
+    onSuccess: () => {
+      setScriptFeedback('')
+      queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['pipeline', projectId] })
+    },
+  })
+
+  const assetReview = useMutation({
+    mutationFn: (decision: 'APPROVE' | 'REVISE') =>
+      submitAssetReview(projectId, decision, assetFeedback),
+    onSuccess: () => {
+      setAssetFeedback('')
+      queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['pipeline', projectId] })
+    },
+  })
+
+  const storyboardReview = useMutation({
+    mutationFn: (decision: 'APPROVE' | 'REVISE') =>
+      submitStoryboardReview(projectId, decision, storyboardFeedback),
+    onSuccess: () => {
+      setStoryboardFeedback('')
+      queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['pipeline', projectId] })
+    },
+  })
+
+  if (!humanReview) {
+    return (
+      <div className="review-panel empty">
+        <p className="muted">等待流水线启动...</p>
+      </div>
+    )
+  }
+
+  const stage = humanReview.stage
+
+  // 剧本审核
+  if (stage === 'SCRIPT_REVIEW' && humanReview.screenplay) {
+    return (
+      <div className="review-panel">
+        <h3>剧本审核</h3>
+        <div className="review-content">
+          <div className="screenplay-preview">
+            <h4>剧本内容</h4>
+            <p className="logline"><strong>一句话：</strong>{humanReview.screenplay.logline}</p>
+            <div className="scenes-list">
+              {(humanReview.screenplay.scenes ?? []).map((scene, sceneIndex) => (
+                <div key={`scene-${sceneIndex}`} className="scene-block">
+                  <h5>场景 {sceneIndex + 1}: {scene.title}</h5>
+                  <p className="muted">{scene.description}</p>
+                  <div className="shots-list">
+                    {(scene.shots ?? []).map((shot, shotIndex) => (
+                      <div key={`shot-${shotIndex}`} className="shot-block">
+                        <strong>镜头 {shotIndex + 1}: {shot.title}</strong>
+                        <p className="muted">
+                          {shot.duration ?? '-'}s · {shot.framing} · {shot.camera_motion}
+                        </p>
+                        <p>{shot.description}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="review-actions">
+            <textarea
+              placeholder="如需修改，请写明镜头、时长、剧情或节奏问题"
+              value={scriptFeedback}
+              onChange={(event) => setScriptFeedback(event.target.value)}
+            />
+            <div className="action-buttons">
+              <button
+                className="primary"
+                disabled={scriptReview.isPending}
+                onClick={() => scriptReview.mutate('APPROVE')}
+              >
+                通过剧本并继续
+              </button>
+              <button
+                disabled={scriptReview.isPending || !scriptFeedback.trim()}
+                onClick={() => scriptReview.mutate('REVISE')}
+              >
+                按意见修改剧本
+              </button>
+            </div>
+            {scriptReview.isError && (
+              <p className="error">提交失败：{String(scriptReview.error)}</p>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // 资产审核
+  if (stage === 'ASSET_REVIEW' && humanReview.characters) {
+    return (
+      <div className="review-panel">
+        <h3>资产审核</h3>
+        <div className="review-content">
+          <div className="assets-preview">
+            <div className="characters-section">
+              <h4>角色 ({humanReview.characters.length})</h4>
+              {humanReview.characters.map((char) => (
+                <div key={char.id} className="asset-card">
+                  <strong>{char.name}</strong>
+                  <span className="muted"> · {char.gender} · {char.age_range} · {char.role}</span>
+                  <p className="muted">{char.description}</p>
+                  <p><strong>外形：</strong>{char.appearance}</p>
+                  <p><strong>服装：</strong>{char.costume}</p>
+                  {char.visual_anchors?.length > 0 && (
+                    <p><strong>视觉锚点：</strong>{char.visual_anchors.join('、')}</p>
+                  )}
+                  {char.immutable_traits?.length > 0 && (
+                    <p><strong>不可变特征：</strong>{char.immutable_traits.join('、')}</p>
+                  )}
+                  <span className={`badge ${char.status === 'LOCKED' ? 'ok' : ''}`}>{char.status}</span>
+                </div>
+              ))}
+            </div>
+            {humanReview.locations && humanReview.locations.length > 0 && (
+              <div className="locations-section">
+                <h4>场景 ({humanReview.locations.length})</h4>
+                {humanReview.locations.map((loc) => (
+                  <div key={loc.id} className="asset-card">
+                    <strong>{loc.name}</strong>
+                    <span className="muted"> · {loc.time_of_day_default}</span>
+                    <p className="muted">{loc.description}</p>
+                    <p><strong>风格：</strong>{loc.visual_style}</p>
+                    {loc.colors?.length > 0 && (
+                      <p><strong>主色：</strong>{loc.colors.join('、')}</p>
+                    )}
+                    {loc.materials?.length > 0 && (
+                      <p><strong>材质：</strong>{loc.materials.join('、')}</p>
+                    )}
+                    {loc.visual_cues?.length > 0 && (
+                      <p><strong>可视锚点：</strong>{loc.visual_cues.join('、')}</p>
+                    )}
+                    {loc.immutable_elements?.length > 0 && (
+                      <p><strong>固定元素：</strong>{loc.immutable_elements.join('、')}</p>
+                    )}
+                    <span className={`badge ${loc.status === 'LOCKED' ? 'ok' : ''}`}>{loc.status}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="review-actions">
+            <textarea
+              placeholder="如需修改，请写明角色或场景的问题，如外观、风格、数量等"
+              value={assetFeedback}
+              onChange={(event) => setAssetFeedback(event.target.value)}
+            />
+            <div className="action-buttons">
+              <button
+                className="primary"
+                disabled={assetReview.isPending}
+                onClick={() => assetReview.mutate('APPROVE')}
+              >
+                通过资产并继续
+              </button>
+              <button
+                disabled={assetReview.isPending || !assetFeedback.trim()}
+                onClick={() => assetReview.mutate('REVISE')}
+              >
+                按意见修改资产
+              </button>
+            </div>
+            {assetReview.isError && (
+              <p className="error">提交失败：{String(assetReview.error)}</p>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // 分镜审核
+  if (stage === 'STORYBOARD_REVIEW' && humanReview.storyboards) {
+    return (
+      <div className="review-panel">
+        <h3>分镜审核</h3>
+        <div className="review-content">
+          <div className="storyboards-preview">
+            <div className="storyboard-grid">
+              {humanReview.storyboards.map((sb) => (
+                <div key={sb.id} className={`storyboard-card ${sb.is_locked ? 'locked' : ''}`}>
+                  <img src={`${API_BASE}${sb.media_url}`} alt={sb.id} />
+                  <div className="storyboard-meta">
+                    <strong>镜头 {sb.shot_id}</strong>
+                    <span className="muted">{sb.id}</span>
+                    {sb.is_locked && <span className="badge ok">已锁定</span>}
+                    {sb.is_selected && <span className="badge">已选定</span>}
+                  </div>
+                  <p className="take-prompt">{sb.prompt}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="review-actions">
+            <textarea
+              placeholder="如需修改，请写明分镜的问题，如构图、风格、角色表现等"
+              value={storyboardFeedback}
+              onChange={(event) => setStoryboardFeedback(event.target.value)}
+            />
+            <div className="action-buttons">
+              <button
+                className="primary"
+                disabled={storyboardReview.isPending}
+                onClick={() => storyboardReview.mutate('APPROVE')}
+              >
+                通过分镜并继续
+              </button>
+              <button
+                disabled={storyboardReview.isPending || !storyboardFeedback.trim()}
+                onClick={() => storyboardReview.mutate('REVISE')}
+              >
+                按意见修改分镜
+              </button>
+            </div>
+            {storyboardReview.isError && (
+              <p className="error">提交失败：{String(storyboardReview.error)}</p>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // 没有待审核内容
+  return (
+    <div className="review-panel empty">
+      <p className="muted">
+        {stage === 'COMPLETE' ? '流水线已完成' : '当前无需人工审核'}
+      </p>
+    </div>
+  )
+}

@@ -1,5 +1,7 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useAppStore } from './stores/app'
+import { fetchHumanReview } from './api/client'
 import ProjectList from './components/ProjectList'
 import Toolbar from './components/Toolbar'
 import ProjectNavigator from './components/ProjectNavigator'
@@ -8,10 +10,24 @@ import ShotWorkspace from './components/ShotWorkspace'
 import AssetPanel from './components/AssetPanel'
 import TimelineBar from './components/TimelineBar'
 import AgentActivity from './components/AgentActivity'
+import ReviewPanel from './components/ReviewPanel'
 
 export default function App() {
   const projectId = useAppStore((s) => s.projectId)
-  const [tab, setTab] = useState<'shot' | 'assets'>('shot')
+  const [tab, setTab] = useState<'shot' | 'assets' | 'review'>('shot')
+
+  const { data: humanReview } = useQuery({
+    queryKey: ['human-review', projectId],
+    queryFn: () => fetchHumanReview(projectId!),
+    enabled: !!projectId,
+    refetchInterval: 1200,
+  })
+
+  const needsReview = humanReview && ['SCRIPT_REVIEW', 'ASSET_REVIEW', 'STORYBOARD_REVIEW'].includes(humanReview.stage)
+  useEffect(() => {
+    if (needsReview) setTab('review')
+    else if (tab === 'review') setTab('shot')
+  }, [needsReview, tab])
 
   if (!projectId) return <ProjectList />
 
@@ -34,14 +50,26 @@ export default function App() {
             >
               角色 / 场景资产
             </button>
+            {needsReview && (
+              <button
+                className={tab === 'review' ? 'primary' : ''}
+                onClick={() => setTab('review')}
+              >
+                {humanReview.stage === 'SCRIPT_REVIEW' ? '剧本审核' :
+                 humanReview.stage === 'ASSET_REVIEW' ? '资产审核' :
+                 humanReview.stage === 'STORYBOARD_REVIEW' ? '分镜审核' : '人工审核'}
+              </button>
+            )}
           </div>
           {tab === 'shot' ? (
             <>
               <PreviewPlayer />
               <ShotWorkspace />
             </>
-          ) : (
+          ) : tab === 'assets' ? (
             <AssetPanel />
+          ) : (
+            <ReviewPanel />
           )}
         </div>
         <AgentActivity />

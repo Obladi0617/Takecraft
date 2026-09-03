@@ -25,6 +25,9 @@ class MockTextModel:
 
     async def complete(self, system: str, user: str) -> str:
         # 按特异关键词优先匹配：多个系统提示词都含「剧本」「导演」这类泛词
+        if "视频生成提示词导演" in system:
+            feedback = user.rpartition("人工复审意见：")[2].strip()
+            return json.dumps({"prompt": f"按人工意见重拍：{feedback}。保持原剧本、分镜、角色与场景一致性。"}, ensure_ascii=False)
         if "审核" in system or "review" in system:
             return _take_review(user)
         if "提示词工程师" in system:
