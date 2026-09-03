@@ -163,6 +163,8 @@ async def scripting(state: ProductionState) -> dict:
         scene_ids: list[str] = []
         shot_ids: list[str] = []
         for sc in screenplay.get("scenes", []):
+            if settings.video_backend == "comfyui" and len(shot_ids) >= 3:
+                break
             index, scene_id = next_seq_and_id(session, Scene, project_id, "scene")
             session.add(
                 Scene(
@@ -174,7 +176,10 @@ async def scripting(state: ProductionState) -> dict:
                 )
             )
             scene_ids.append(scene_id)
-            for sh in sc.get("shots", []):
+            scene_shots = sc.get("shots", [])
+            if settings.video_backend == "comfyui":
+                scene_shots = scene_shots[:1]
+            for sh in scene_shots:
                 s_index, shot_id = next_seq_and_id(session, Shot, project_id, "shot")
                 session.add(
                     Shot(
@@ -212,6 +217,8 @@ async def asset_design(state: ProductionState) -> dict:
         plan = await producer_plan(model, idea, screenplay)
         record_artifact(session, project_id, "production_plan", "producer", plan)
         take_count = max(1, min(4, int(plan.get("default_take_count") or 2)))
+        if settings.video_backend == "comfyui":
+            take_count = 1
         for shot in _shots_of_project(session, project_id):
             shot.take_count = take_count
             session.add(shot)
