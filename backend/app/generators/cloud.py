@@ -84,6 +84,24 @@ def _headers(api_key: str) -> dict[str, str]:
     }
 
 
+async def _modelscope_request(
+    client: httpx.AsyncClient, method: str, url: str, **kwargs
+) -> httpx.Response:
+    """Retry ModelScope's dynamic AIGC throttling without duplicating a task."""
+    for attempt in range(5):
+        response = await client.request(method, url, **kwargs)
+        if response.status_code != 429:
+            return response
+        if attempt == 4:
+            return response
+        retry_after = response.headers.get("Retry-After")
+        try:
+            delay = float(retry_after) if retry_after else 5.0 * (2**attempt)
+        except ValueError:
+            delay = 5.0 * (2**attempt)
+        await asyncio.sleep(min(delay, 60.0))
+    raise RuntimeError("unreachable")
+
 class ModelScopeImageGenerator:
     """ModelScope API-Inference 图像后端（异步任务协议）。
 
@@ -107,7 +125,8 @@ class ModelScopeImageGenerator:
         else:
             size = "1328x1328"
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
+            resp = await _modelscope_request(
+                client, "POST",
                 f"{base}/v1/images/generations",
                 headers={
                     **_headers(settings.modelscope_api_key),
@@ -126,7 +145,8 @@ class ModelScopeImageGenerator:
             deadline = asyncio.get_event_loop().time() + POLL_TIMEOUT
             while asyncio.get_event_loop().time() < deadline:
                 await asyncio.sleep(POLL_INTERVAL)
-                result = await client.get(
+                result = await _modelscope_request(
+                    client, "GET",
                     f"{base}/v1/tasks/{task_id}",
                     headers={
                         **_headers(settings.modelscope_api_key),

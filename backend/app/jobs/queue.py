@@ -27,6 +27,7 @@ class GenerationQueue:
     def __init__(self) -> None:
         self._wakeup = asyncio.Event()
         self._running = False
+        self._image_sem: asyncio.Semaphore | None = None
         self._video_sem: asyncio.Semaphore | None = None
         self._review_sem: asyncio.Semaphore | None = None
         self._poll_task: asyncio.Task | None = None
@@ -34,6 +35,7 @@ class GenerationQueue:
 
     async def start(self) -> None:
         self._running = True
+        self._image_sem = asyncio.Semaphore(settings.image_generation_concurrency)
         self._video_sem = asyncio.Semaphore(settings.video_generation_concurrency)
         self._review_sem = asyncio.Semaphore(settings.review_concurrency)
         self._poll_task = asyncio.create_task(self._poll_loop())
@@ -100,7 +102,13 @@ class GenerationQueue:
         self, project_id: str, job_id: str, job_type: str
     ) -> None:
         # 只有会打外部重资源的任务类型才限并发：VIDEO 打生成端点，REVIEW 打视觉模型
-        semaphores = {"VIDEO": self._video_sem, "REVIEW": self._review_sem}
+        semaphores = {
+            "STORYBOARD": self._image_sem,
+            "CHARACTER": self._image_sem,
+            "LOCATION": self._image_sem,
+            "VIDEO": self._video_sem,
+            "REVIEW": self._review_sem,
+        }
         semaphore = semaphores.get(job_type)
         try:
             if semaphore is not None:

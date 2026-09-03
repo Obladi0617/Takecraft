@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     )
     image_backend: str = "mock"  # mock | modelscope
     video_backend: str = "mock"  # mock | image_motion | comfyui | minimax | modelscope
+    image_generation_concurrency: int = 1  # ModelScope AIGC 动态限流，默认串行
     video_generation_concurrency: int = 1  # 规格书第 24 节
     comfyui_base_url: str = "http://127.0.0.1:8188"
     comfyui_timeout: float = 3600.0
