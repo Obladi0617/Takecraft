@@ -1,5 +1,7 @@
 # AI Film Agent
 
+> **当前 DGX Spark 真视频版使用方法：见 [README-DGX.md](README-DGX.md)。**
+
 > 本地优先（Local-first）的多智能体 AI 短片生产工作流系统
 > ModelScope「AI+∞ 开发者创作大赛」参赛作品
 
