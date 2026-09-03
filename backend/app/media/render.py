@@ -4,6 +4,7 @@ from pathlib import Path
 
 from ..db import abs_path, project_path
 from ..domain import Take, TimelineClip
+from .ffmpeg import FFMPEG, FFPROBE
 
 RENDER_WIDTH = 1280
 RENDER_HEIGHT = 720
@@ -11,9 +12,11 @@ RENDER_FPS = 24
 
 
 def probe_has_audio(path: Path) -> bool:
+    if not FFPROBE:
+        raise RuntimeError("ffprobe 不可用，无法检测音轨")
     result = subprocess.run(
         [
-            "ffprobe",
+            FFPROBE,
             "-v",
             "error",
             "-select_streams",
@@ -31,6 +34,8 @@ def probe_has_audio(path: Path) -> bool:
 
 
 def _segment_cmd(src: Path, dst: Path, ss: float, dur: float, volume: float) -> list[str]:
+    if not FFMPEG:
+        raise RuntimeError("ffmpeg 不可用，无法渲染成片")
     vf = (
         f"scale={RENDER_WIDTH}:{RENDER_HEIGHT}:force_original_aspect_ratio=decrease,"
         f"pad={RENDER_WIDTH}:{RENDER_HEIGHT}:(ow-iw)/2:(oh-ih)/2,"
@@ -38,7 +43,7 @@ def _segment_cmd(src: Path, dst: Path, ss: float, dur: float, volume: float) -> 
     )
     if probe_has_audio(src):
         return [
-            "ffmpeg", "-y", "-loglevel", "error",
+            FFMPEG, "-y", "-loglevel", "error",
             "-ss", f"{ss:.3f}", "-i", str(src), "-t", f"{dur:.3f}",
             "-vf", vf,
             "-af", f"volume={volume:.2f}",
@@ -47,7 +52,7 @@ def _segment_cmd(src: Path, dst: Path, ss: float, dur: float, volume: float) -> 
             str(dst),
         ]
     return [
-        "ffmpeg", "-y", "-loglevel", "error",
+        FFMPEG, "-y", "-loglevel", "error",
         "-ss", f"{ss:.3f}", "-i", str(src),
         "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
         "-t", f"{dur:.3f}",
@@ -96,7 +101,7 @@ def render_timeline(project_id: str, clips: list[tuple[TimelineClip, Take]]) -> 
         )
         result = subprocess.run(
             [
-                "ffmpeg", "-y", "-loglevel", "error",
+                FFMPEG, "-y", "-loglevel", "error",
                 "-f", "concat", "-safe", "0", "-i", str(concat_list),
                 "-c", "copy", str(out),
             ],
