@@ -24,9 +24,9 @@ CHARACTER_ASSET_TYPE = "CHARACTER_TURNAROUND"
 LOCATION_ASSET_TYPE = "LOCATION_REFERENCE"
 
 VIEW_LABELS = {
-    "FRONT": "严格正面全身视图，人物正对镜头，完整展示头到脚",
-    "SIDE": "严格九十度侧面全身视图，仅展示侧面轮廓，禁止正面构图",
-    "BACK": "严格背面全身视图，人物背对镜头，清楚展示背部结构",
+    "FRONT": "严格正面完整主体视图，主体朝向镜头，完整展示整体结构",
+    "SIDE": "严格九十度侧面完整主体视图，仅展示侧面轮廓，禁止正面构图",
+    "BACK": "严格背面完整主体视图，主体背向镜头，清楚展示背部结构",
     "ESTABLISHING": "场景主角度全景，广角建立镜头，展示完整空间布局",
     "KEY_ANGLE_A": "场景角度 A，从主角度横向改变约四十五度，展示明显不同的空间透视",
     "KEY_ANGLE_B": "场景反向角度，展示与主角度明显不同的空间关系",
@@ -75,7 +75,9 @@ def character_design_prompt(character: Character) -> str:
         parts.append(character.costume)
     if character.immutable_traits:
         parts.append("、".join(character.immutable_traits))
-    parts.append("角色设定图，单人全身，纯色浅灰背景，均匀柔和光照")
+    parts.append("角色设定图，单个完整主体，纯色浅灰背景，均匀柔和光照")
+    if character.gender in {"其他", "非人", "无"}:
+        parts.append("严格非人类生物设计，禁止出现人类、人物、人形躯干、人脸、人类四肢或服装")
     return "，".join(p for p in parts if p)
 
 

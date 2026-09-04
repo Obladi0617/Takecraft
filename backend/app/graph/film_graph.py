@@ -207,44 +207,6 @@ async def script_review(state: ProductionState) -> dict:
         if not feedback:
             await asyncio.sleep(1.0)
             continue
-        target_asset_ids = [str(value) for value in decision.get("target_asset_ids", []) if value]
-        if target_asset_ids:
-            with _session(project_id) as session:
-                selected_assets = [
-                    asset for asset_id in target_asset_ids
-                    if (asset := session.get(Asset, asset_id)) is not None
-                    and asset.project_id == project_id
-                ]
-                job_ids: list[str] = []
-                for asset in selected_assets:
-                    owner_id = str(asset.meta.get("owner_id") or "")
-                    view = str(asset.meta.get("view") or "")
-                    character = session.get(Character, owner_id)
-                    location = session.get(Location, owner_id)
-                    if character is not None:
-                        prompt = f"{character_design_prompt(character)}。人工返修意见：{feedback}"
-                        job_ids.append(enqueue_asset_job(
-                            session, project_id, owner_id, "CHARACTER", prompt, [view],
-                            width=768, height=1024,
-                        ).id)
-                    elif location is not None:
-                        prompt = f"{location_design_prompt(location)}。人工返修意见：{feedback}"
-                        job_ids.append(enqueue_asset_job(
-                            session, project_id, owner_id, "LOCATION", prompt, [view],
-                        ).id)
-                if not job_ids:
-                    raise RuntimeError("所选资产图片已不存在，无法打回")
-            statuses = await wait_for_jobs(project_id, job_ids)
-            failed = [job_id for job_id, status in statuses.items() if status != "DONE"]
-            if failed:
-                raise RuntimeError(f"所选资产图片重新生成失败: {failed}")
-            # Create a fresh review revision so the consumed decision is not
-            # picked up again by the polling loop.
-            with _session(project_id) as session:
-                record_artifact(session, project_id, "character_cards", "character_designer", {"characters": old_chars})
-                record_artifact(session, project_id, "location_cards", "art_director", {"locations": old_locs})
-            _stage_update(project_id, "ASSET_REVIEW", f"已按意见重生成 {len(job_ids)} 张图片，等待再次审核")
-            continue
         revised = await revise_screenplay(model, idea, screenplay, feedback)
         with _session(project_id) as session:
             record_artifact(session, project_id, "screenplay", "writer", revised)
@@ -455,6 +417,43 @@ async def asset_review(state: ProductionState) -> dict:
         feedback = str(decision.get("feedback") or "").strip()
         if not feedback:
             await asyncio.sleep(1.0)
+            continue
+        target_asset_ids = [str(value) for value in decision.get("target_asset_ids", []) if value]
+        if target_asset_ids:
+            with _session(project_id) as session:
+                selected_assets = [
+                    asset for asset_id in target_asset_ids
+                    if (asset := session.get(Asset, asset_id)) is not None
+                    and asset.project_id == project_id
+                ]
+                job_ids: list[str] = []
+                for asset in selected_assets:
+                    owner_id = str(asset.meta.get("owner_id") or "")
+                    view = str(asset.meta.get("view") or "")
+                    character = session.get(Character, owner_id)
+                    location = session.get(Location, owner_id)
+                    if character is not None:
+                        prompt = f"{character_design_prompt(character)}。人工返修意见：{feedback}"
+                        job_ids.append(enqueue_asset_job(
+                            session, project_id, owner_id, "CHARACTER", prompt, [view],
+                            width=768, height=1024,
+                        ).id)
+                    elif location is not None:
+                        prompt = f"{location_design_prompt(location)}。人工返修意见：{feedback}"
+                        job_ids.append(enqueue_asset_job(
+                            session, project_id, owner_id, "LOCATION", prompt, [view],
+                        ).id)
+                if not job_ids:
+                    raise RuntimeError("所选资产图片已不存在，无法打回")
+            statuses = await wait_for_jobs(project_id, job_ids)
+            failed = [job_id for job_id, status in statuses.items() if status != "DONE"]
+            if failed:
+                raise RuntimeError(f"所选资产图片重新生成失败: {failed}")
+            # Create fresh card revisions so this decision is consumed exactly once.
+            with _session(project_id) as session:
+                record_artifact(session, project_id, "character_cards", "character_designer", {"characters": old_chars})
+                record_artifact(session, project_id, "location_cards", "art_director", {"locations": old_locs})
+            _stage_update(project_id, "ASSET_REVIEW", f"已按意见重生成 {len(job_ids)} 张图片，等待再次审核")
             continue
         with _session(project_id) as session:
             screenplay = _latest_artifact(session, project_id, "screenplay")
