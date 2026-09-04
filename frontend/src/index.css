@@ -956,6 +956,20 @@ textarea:focus {
   align-self: flex-start;
 }
 
+.review-explainer {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.storyboard-choice {
+  width: 100%;
+}
+
 .shot-text-detail {
   padding: 10px;
   border: 1px solid var(--border);

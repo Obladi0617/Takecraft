@@ -7,6 +7,7 @@ import {
   submitScriptReview,
   submitAssetReview,
   submitStoryboardReview,
+  selectStoryboard,
 } from '../api/client'
 import { useAppStore } from '../stores/app'
 
@@ -87,6 +88,14 @@ export default function ReviewPanel() {
       setStoryboardFeedback('')
       queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
       queryClient.invalidateQueries({ queryKey: ['pipeline', projectId] })
+    },
+  })
+
+  const chooseStoryboard = useMutation({
+    mutationFn: (storyboardId: string) => selectStoryboard(projectId, storyboardId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['shots', projectId] })
     },
   })
 
@@ -280,6 +289,10 @@ export default function ReviewPanel() {
     return (
       <div className="review-panel">
         <h3>分镜审核</h3>
+        <p className="review-explainer">
+          每个镜头可以有多个历史版本。蓝色“已选用于视频”表示通过审核后将使用该图作为视频首帧；
+          “已锁定”只表示它曾经是确认版本，你仍可改选其他版本。
+        </p>
         <div className="review-content">
           <div className="storyboards-preview">
             <div className="storyboard-grid">
@@ -292,8 +305,15 @@ export default function ReviewPanel() {
                     <strong>镜头 {sb.shot_id}</strong>
                     <span className="muted">{sb.id}</span>
                     {sb.is_locked && <span className="badge ok">已锁定</span>}
-                    {sb.is_selected && <span className="badge">已选定</span>}
+                    {sb.is_selected && <span className="badge">已选用于视频</span>}
                   </div>
+                  <button
+                    className={sb.is_selected ? 'primary storyboard-choice' : 'storyboard-choice'}
+                    disabled={chooseStoryboard.isPending || sb.is_selected}
+                    onClick={() => chooseStoryboard.mutate(sb.id)}
+                  >
+                    {sb.is_selected ? '✓ 已选用于生成视频' : '选择这张用于生成视频'}
+                  </button>
                   <button className="shot-detail-toggle" onClick={() => setExpandedShots((ids) => ids.includes(sb.id) ? ids.filter((id) => id !== sb.id) : [...ids, sb.id])}>
                     {expandedShots.includes(sb.id) ? '收起镜头文字' : '查看镜头文字'}
                   </button>

@@ -92,8 +92,6 @@ def select_storyboard(
     sb = session.get(Storyboard, sb_id)
     if sb is None or sb.project_id != project_id:
         raise HTTPException(status_code=404, detail="storyboard not found")
-    if sb.status == "LOCKED":
-        raise HTTPException(status_code=409, detail="已锁定的分镜不可取消选择")
     shot = session.get(Shot, sb.shot_id)
     if shot is None:
         raise HTTPException(status_code=404, detail="shot not found")

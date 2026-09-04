@@ -605,7 +605,12 @@ async def storyboard_review(state: ProductionState) -> dict:
                     )
                     if not candidates:
                         continue
-                    if settings.image_backend == "mock" or len(candidates) == 1:
+                    selected = next((candidate for candidate in candidates if candidate.id == shot.storyboard_id), None)
+                    if selected is not None:
+                        # Human selection is authoritative. Never let the model
+                        # replace the version explicitly chosen for video.
+                        sb_id = selected.id
+                    elif settings.image_backend == "mock" or len(candidates) == 1:
                         sb_id = candidates[0].id
                     else:
                         sb_id = await select_storyboard(
