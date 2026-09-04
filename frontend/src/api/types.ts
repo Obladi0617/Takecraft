@@ -276,6 +276,11 @@ export interface StoryboardInfo {
   status: string
   is_selected: boolean
   is_locked: boolean
+  shot_title: string
+  shot_description: string
+  duration: number | null
+  framing: string
+  camera_motion: string
 }
 
 export interface HumanReviewState {

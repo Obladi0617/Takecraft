@@ -274,6 +274,11 @@ def human_review_state(
                 storyboard_shot and storyboard_shot.storyboard_id == sb.id
             ),
             "is_locked": sb.status == "LOCKED",
+            "shot_title": storyboard_shot.title if storyboard_shot else "",
+            "shot_description": storyboard_shot.description if storyboard_shot else "",
+            "duration": storyboard_shot.duration_target if storyboard_shot else None,
+            "framing": storyboard_shot.framing if storyboard_shot else "",
+            "camera_motion": storyboard_shot.camera_motion if storyboard_shot else "",
         })
     return {
         "stage": project.status,

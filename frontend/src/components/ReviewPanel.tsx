@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   API_BASE,
@@ -25,6 +25,25 @@ export default function ReviewPanel() {
   const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([])
   const [storyboardFeedback, setStoryboardFeedback] = useState('')
   const [shotFeedback, setShotFeedback] = useState<Record<string, string>>({})
+  const [previewImage, setPreviewImage] = useState<{ url: string; alt: string } | null>(null)
+  const [expandedShots, setExpandedShots] = useState<string[]>([])
+
+  useEffect(() => {
+    if (!previewImage) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setPreviewImage(null)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [previewImage])
+
+  const imageModal = previewImage && (
+    <div className="image-modal" role="dialog" aria-modal="true" aria-label={previewImage.alt} onClick={() => setPreviewImage(null)}>
+      <button className="image-modal-close" onClick={() => setPreviewImage(null)} aria-label="关闭大图">×</button>
+      <img src={previewImage.url} alt={previewImage.alt} onClick={(event) => event.stopPropagation()} />
+      <span className="image-modal-hint">按 Esc 或点击黑色背景关闭</span>
+    </div>
+  )
 
   const { data: humanReview } = useQuery({
     queryKey: ['human-review', projectId],
@@ -166,9 +185,9 @@ export default function ReviewPanel() {
                   <div className="asset-refs review-asset-refs">
                     {(assetBundle?.characters.find((item) => item.id === char.id)?.references ?? []).map((ref) => (
                       <div key={ref.id} className={`asset-view selectable ${selectedAssetIds.includes(ref.id) ? 'selected' : ''}`}>
-                        <a href={`${API_BASE}${ref.media_url}`} target="_blank" rel="noreferrer">
-                          <img src={`${API_BASE}${ref.media_url}`} alt={`${char.name} ${ref.view}`} title="点击查看原图" />
-                        </a>
+                        <button className="image-preview-button" onClick={() => setPreviewImage({ url: `${API_BASE}${ref.media_url}`, alt: `${char.name} ${ref.view}` })}>
+                          <img src={`${API_BASE}${ref.media_url}`} alt={`${char.name} ${ref.view}`} title="点击查看大图" />
+                        </button>
                         <div className="asset-view-foot">
                           <span>{ref.view}</span>
                           <label><input type="checkbox" checked={selectedAssetIds.includes(ref.id)} onChange={() => setSelectedAssetIds((ids) => ids.includes(ref.id) ? ids.filter((id) => id !== ref.id) : [...ids, ref.id])} /> 打回此图</label>
@@ -206,9 +225,9 @@ export default function ReviewPanel() {
                         .filter((ref) => LOCATION_REVIEW_VIEWS.has(ref.view ?? ''))
                         .map((ref) => (
                           <div key={ref.id} className={`asset-view selectable ${selectedAssetIds.includes(ref.id) ? 'selected' : ''}`}>
-                            <a href={`${API_BASE}${ref.media_url}`} target="_blank" rel="noreferrer">
-                              <img src={`${API_BASE}${ref.media_url}`} alt={`${loc.name} ${ref.view}`} title="点击查看原图" />
-                            </a>
+                            <button className="image-preview-button" onClick={() => setPreviewImage({ url: `${API_BASE}${ref.media_url}`, alt: `${loc.name} ${ref.view}` })}>
+                              <img src={`${API_BASE}${ref.media_url}`} alt={`${loc.name} ${ref.view}`} title="点击查看大图" />
+                            </button>
                             <div className="asset-view-foot">
                               <span>{LOCATION_VIEW_LABEL[ref.view ?? ''] ?? ref.view}</span>
                               <label><input type="checkbox" checked={selectedAssetIds.includes(ref.id)} onChange={() => setSelectedAssetIds((ids) => ids.includes(ref.id) ? ids.filter((id) => id !== ref.id) : [...ids, ref.id])} /> 打回此图</label>
@@ -250,6 +269,7 @@ export default function ReviewPanel() {
               <p className="error">提交失败：{String(assetReview.error)}</p>
             )}
           </div>
+          {imageModal}
         </div>
       </div>
     )
@@ -265,18 +285,28 @@ export default function ReviewPanel() {
             <div className="storyboard-grid">
               {humanReview.storyboards.map((sb) => (
                 <div key={sb.id} className={`storyboard-card ${sb.is_locked ? 'locked' : ''}`}>
-                  <a href={`${API_BASE}${sb.media_url}`} target="_blank" rel="noreferrer">
-                    <img src={`${API_BASE}${sb.media_url}`} alt={sb.id} title="点击查看原图" />
-                  </a>
+                  <button className="image-preview-button" onClick={() => setPreviewImage({ url: `${API_BASE}${sb.media_url}`, alt: `镜头 ${sb.shot_id}` })}>
+                    <img src={`${API_BASE}${sb.media_url}`} alt={sb.id} title="点击查看大图" />
+                  </button>
                   <div className="storyboard-meta">
                     <strong>镜头 {sb.shot_id}</strong>
                     <span className="muted">{sb.id}</span>
                     {sb.is_locked && <span className="badge ok">已锁定</span>}
                     {sb.is_selected && <span className="badge">已选定</span>}
                   </div>
-                  <p className="take-prompt">{sb.prompt}</p>
+                  <button className="shot-detail-toggle" onClick={() => setExpandedShots((ids) => ids.includes(sb.id) ? ids.filter((id) => id !== sb.id) : [...ids, sb.id])}>
+                    {expandedShots.includes(sb.id) ? '收起镜头文字' : '查看镜头文字'}
+                  </button>
+                  {expandedShots.includes(sb.id) && (
+                    <div className="shot-text-detail">
+                      <p><strong>标题：</strong>{sb.shot_title || '未命名镜头'}</p>
+                      <p><strong>时长：</strong>{sb.duration ?? '-'} 秒　<strong>景别：</strong>{sb.framing || '-'}　<strong>运镜：</strong>{sb.camera_motion || '-'}</p>
+                      <p><strong>画面内容：</strong>{sb.shot_description || '暂无描述'}</p>
+                      <p><strong>生图提示词：</strong>{sb.prompt}</p>
+                    </div>
+                  )}
                   <textarea
-                    placeholder="仅打回这个镜头：填写构图、角色、动作等修改方向"
+                    placeholder="填写这个镜头需要怎样修改，例如构图、角色、动作或光线"
                     value={shotFeedback[sb.shot_id] ?? ''}
                     onChange={(event) => setShotFeedback((current) => ({
                       ...current, [sb.shot_id]: event.target.value,
@@ -289,7 +319,7 @@ export default function ReviewPanel() {
                       feedback: shotFeedback[sb.shot_id],
                       shotIds: [sb.shot_id],
                     })}
-                  >按意见仅重做本镜头</button>
+                  >打回并重做这个镜头</button>
                 </div>
               ))}
             </div>
@@ -319,6 +349,7 @@ export default function ReviewPanel() {
               <p className="error">提交失败：{String(storyboardReview.error)}</p>
             )}
           </div>
+          {imageModal}
         </div>
       </div>
     )
