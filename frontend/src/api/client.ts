@@ -318,10 +318,11 @@ export const submitAssetReview = (
   pid: string,
   decision: 'APPROVE' | 'REVISE',
   feedback = '',
+  targetAssetIds: string[] = [],
 ) =>
   api<{ ok: boolean; review_id: string; decision: string }>(
     `/api/v1/projects/${pid}/asset-review`,
-    { method: 'POST', body: JSON.stringify({ decision, feedback }) },
+    { method: 'POST', body: JSON.stringify({ decision, feedback, target_asset_ids: targetAssetIds }) },
   )
 
 export const submitStoryboardReview = (

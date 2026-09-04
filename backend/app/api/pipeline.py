@@ -26,6 +26,7 @@ class HumanReviewIn(BaseModel):
     decision: str
     feedback: str = ""
     target_shot_ids: list[str] = []
+    target_asset_ids: list[str] = []
 
 
 def _latest_artifact(
@@ -327,10 +328,19 @@ def submit_asset_review(
         raise HTTPException(status_code=422, detail="decision must be APPROVE or REVISE")
     if decision == "REVISE" and not body.feedback.strip():
         raise HTTPException(status_code=422, detail="修改资产时必须填写审核意见")
+    target_asset_ids = list(dict.fromkeys(body.target_asset_ids))
+    if decision == "REVISE" and not target_asset_ids:
+        raise HTTPException(status_code=422, detail="请至少选择一张要打回的资产图片")
     char_cards = _latest_artifact(session, project_id, "character_cards")
     loc_cards = _latest_artifact(session, project_id, "location_cards")
     if char_cards is None or loc_cards is None:
         raise HTTPException(status_code=409, detail="尚无可审核资产")
+    if target_asset_ids:
+        assets = list(session.exec(select(Asset).where(Asset.project_id == project_id)))
+        valid_ids = {asset.id for asset in assets}
+        invalid = [asset_id for asset_id in target_asset_ids if asset_id not in valid_ids]
+        if invalid:
+            raise HTTPException(status_code=422, detail=f"资产图片不存在: {', '.join(invalid)}")
     if decision == "APPROVE":
         refs = list(session.exec(select(Asset).where(Asset.project_id == project_id)))
         missing: list[str] = []
@@ -367,7 +377,7 @@ def submit_asset_review(
         project_id,
         "human_asset_review",
         "human",
-        {"decision": decision, "feedback": body.feedback.strip()},
+        {"decision": decision, "feedback": body.feedback.strip(), "target_asset_ids": target_asset_ids},
         char_cards.id,
     )
     record_artifact(
@@ -375,7 +385,7 @@ def submit_asset_review(
         project_id,
         "human_asset_review",
         "human",
-        {"decision": decision, "feedback": body.feedback.strip()},
+        {"decision": decision, "feedback": body.feedback.strip(), "target_asset_ids": target_asset_ids},
         loc_cards.id,
     )
     return {"ok": True, "review_id": artifact.id, "decision": decision}

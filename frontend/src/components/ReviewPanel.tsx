@@ -22,6 +22,7 @@ export default function ReviewPanel() {
   const queryClient = useQueryClient()
   const [scriptFeedback, setScriptFeedback] = useState('')
   const [assetFeedback, setAssetFeedback] = useState('')
+  const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([])
   const [storyboardFeedback, setStoryboardFeedback] = useState('')
   const [shotFeedback, setShotFeedback] = useState<Record<string, string>>({})
 
@@ -50,9 +51,10 @@ export default function ReviewPanel() {
 
   const assetReview = useMutation({
     mutationFn: (decision: 'APPROVE' | 'REVISE') =>
-      submitAssetReview(projectId, decision, assetFeedback),
+      submitAssetReview(projectId, decision, assetFeedback, decision === 'REVISE' ? selectedAssetIds : []),
     onSuccess: () => {
       setAssetFeedback('')
+      setSelectedAssetIds([])
       queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
       queryClient.invalidateQueries({ queryKey: ['pipeline', projectId] })
     },
@@ -163,11 +165,14 @@ export default function ReviewPanel() {
                   <span className={`badge ${char.status === 'LOCKED' ? 'ok' : ''}`}>{char.status}</span>
                   <div className="asset-refs review-asset-refs">
                     {(assetBundle?.characters.find((item) => item.id === char.id)?.references ?? []).map((ref) => (
-                      <div key={ref.id} className="asset-view">
+                      <div key={ref.id} className={`asset-view selectable ${selectedAssetIds.includes(ref.id) ? 'selected' : ''}`}>
                         <a href={`${API_BASE}${ref.media_url}`} target="_blank" rel="noreferrer">
                           <img src={`${API_BASE}${ref.media_url}`} alt={`${char.name} ${ref.view}`} title="点击查看原图" />
                         </a>
-                        <div className="asset-view-foot"><span>{ref.view}</span></div>
+                        <div className="asset-view-foot">
+                          <span>{ref.view}</span>
+                          <label><input type="checkbox" checked={selectedAssetIds.includes(ref.id)} onChange={() => setSelectedAssetIds((ids) => ids.includes(ref.id) ? ids.filter((id) => id !== ref.id) : [...ids, ref.id])} /> 打回此图</label>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -200,12 +205,13 @@ export default function ReviewPanel() {
                       {(assetBundle?.locations.find((item) => item.id === loc.id)?.references ?? [])
                         .filter((ref) => LOCATION_REVIEW_VIEWS.has(ref.view ?? ''))
                         .map((ref) => (
-                          <div key={ref.id} className="asset-view">
+                          <div key={ref.id} className={`asset-view selectable ${selectedAssetIds.includes(ref.id) ? 'selected' : ''}`}>
                             <a href={`${API_BASE}${ref.media_url}`} target="_blank" rel="noreferrer">
                               <img src={`${API_BASE}${ref.media_url}`} alt={`${loc.name} ${ref.view}`} title="点击查看原图" />
                             </a>
                             <div className="asset-view-foot">
                               <span>{LOCATION_VIEW_LABEL[ref.view ?? ''] ?? ref.view}</span>
+                              <label><input type="checkbox" checked={selectedAssetIds.includes(ref.id)} onChange={() => setSelectedAssetIds((ids) => ids.includes(ref.id) ? ids.filter((id) => id !== ref.id) : [...ids, ref.id])} /> 打回此图</label>
                             </div>
                           </div>
                         ))}
@@ -217,7 +223,7 @@ export default function ReviewPanel() {
           </div>
           <div className="review-actions">
             <textarea
-              placeholder="如需修改，请写明角色或场景的问题，如外观、风格、数量等"
+              placeholder="先勾选要打回的图片，再写明修改方向，例如：面罩改成有棱角的方形，保留深黑与橙色光泽"
               value={assetFeedback}
               onChange={(event) => setAssetFeedback(event.target.value)}
             />
@@ -234,10 +240,10 @@ export default function ReviewPanel() {
                     : '通过资产并继续'}
               </button>
               <button
-                disabled={assetReview.isPending || !assetFeedback.trim()}
+                disabled={assetReview.isPending || !assetFeedback.trim() || selectedAssetIds.length === 0}
                 onClick={() => assetReview.mutate('REVISE')}
               >
-                按意见修改资产
+                打回所选图片（{selectedAssetIds.length}）
               </button>
             </div>
             {assetReview.isError && (
