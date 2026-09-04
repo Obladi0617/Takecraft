@@ -418,6 +418,12 @@ async def asset_review(state: ProductionState) -> dict:
             continue
         with _session(project_id) as session:
             screenplay = _latest_artifact(session, project_id, "screenplay")
+        # Generate and validate both replacement card sets before touching the
+        # current assets. A malformed model response must never leave review
+        # showing zero characters/locations.
+        new_chars = await revise_character_cards(model, screenplay, old_chars, feedback)
+        new_locs = await revise_location_cards(model, screenplay, old_locs, feedback)
+        with _session(project_id) as session:
             for char in session.exec(
                 select(Character).where(Character.project_id == project_id)
             ):
@@ -427,9 +433,6 @@ async def asset_review(state: ProductionState) -> dict:
             ):
                 session.delete(loc)
             session.commit()
-        new_chars = await revise_character_cards(model, screenplay, old_chars, feedback)
-        new_locs = await revise_location_cards(model, screenplay, old_locs, feedback)
-        with _session(project_id) as session:
             record_artifact(
                 session, project_id, "character_cards", "character_designer",
                 {"characters": new_chars},

@@ -163,10 +163,17 @@ async def revise_character_cards(
         f"剧本：{json.dumps(screenplay, ensure_ascii=False)}\n"
         f"现有角色卡：{json.dumps(characters, ensure_ascii=False)}\n"
         f"人工审核意见：{feedback}",
-        ("characters",),
+        (),
     )
-    cards = result.get("characters")
-    return [c for c in cards if isinstance(c, dict)] if isinstance(cards, list) else []
+    cards = result.get("characters") or result.get("roles") or result.get("subjects")
+    valid_cards = [c for c in cards if isinstance(c, dict)] if isinstance(cards, list) else []
+    if not valid_cards:
+        # The feedback may target locations only. Some models then omit the
+        # untouched domain entirely; preserve it instead of deleting assets.
+        valid_cards = [c for c in characters if isinstance(c, dict)]
+    if not valid_cards:
+        raise RuntimeError("角色返修结果缺少有效的 characters 数组，且没有旧角色卡可保留")
+    return valid_cards
 
 
 async def revise_location_cards(
@@ -178,10 +185,17 @@ async def revise_location_cards(
         f"剧本：{json.dumps(screenplay, ensure_ascii=False)}\n"
         f"现有场景卡：{json.dumps(locations, ensure_ascii=False)}\n"
         f"人工审核意见：{feedback}",
-        ("locations",),
+        (),
     )
-    cards = result.get("locations")
-    return [c for c in cards if isinstance(c, dict)] if isinstance(cards, list) else []
+    # Models occasionally call scene cards `scenes`; both names represent the
+    # same domain object here, so normalize before validation.
+    cards = result.get("locations") or result.get("scenes")
+    valid_cards = [c for c in cards if isinstance(c, dict)] if isinstance(cards, list) else []
+    if not valid_cards:
+        valid_cards = [c for c in locations if isinstance(c, dict)]
+    if not valid_cards:
+        raise RuntimeError("场景返修结果缺少有效的 locations/scenes 数组，且没有旧场景卡可保留")
+    return valid_cards
 
 
 async def revise_storyboard_prompts(
