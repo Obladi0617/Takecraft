@@ -18,6 +18,25 @@ from .base import (
 POLL_INTERVAL = 5.0
 POLL_TIMEOUT = 900.0
 
+_COMFYUI_MODEL_SWITCH_LOCK = asyncio.Lock()
+_COMFYUI_RESIDENT_MODEL: str | None = None
+
+
+async def _prepare_comfyui_model(
+    client: httpx.AsyncClient, base: str, model_key: str
+) -> None:
+    """Release memory only when changing model families, never between sibling jobs."""
+    global _COMFYUI_RESIDENT_MODEL
+    async with _COMFYUI_MODEL_SWITCH_LOCK:
+        if _COMFYUI_RESIDENT_MODEL == model_key:
+            return
+        response = await client.post(
+            f"{base}/free",
+            json={"unload_models": True, "free_memory": True},
+        )
+        response.raise_for_status()
+        _COMFYUI_RESIDENT_MODEL = model_key
+
 
 class CloudJobRegistry:
     """submit/status/result 三段式（规格 §21 云端 API 模式）的进程内任务表。"""
@@ -174,6 +193,123 @@ class ModelScopeImageGenerator:
                     raise RuntimeError(f"ModelScope 图像任务失败: {data}")
             raise TimeoutError("ModelScope 图像任务轮询超时")
 
+
+class ComfyUIImageGenerator:
+    """Qwen-Image text-to-image through the trusted DGX ComfyUI endpoint."""
+
+    name = "comfyui:qwen-image"
+
+    def __init__(self, workdir: Path):
+        self.workdir = workdir
+
+    @staticmethod
+    def _workflow(request: ImageGenerationRequest, seed: int, prefix: str) -> dict:
+        width = max(256, (int(request.width) // 16) * 16)
+        height = max(256, (int(request.height) // 16) * 16)
+        negative = request.negative_prompt or "low quality, blurry, distorted, watermark, text"
+        return {
+            "1": {"class_type": "UNETLoader", "inputs": {
+                "unet_name": "qwen_image_fp8_e4m3fn.safetensors", "weight_dtype": "default"}},
+            "2": {"class_type": "CLIPLoader", "inputs": {
+                "clip_name": "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+                "type": "qwen_image", "device": "default"}},
+            "3": {"class_type": "VAELoader", "inputs": {
+                "vae_name": "qwen_image_vae.safetensors"}},
+            "4": {"class_type": "ModelSamplingAuraFlow", "inputs": {
+                "model": ["1", 0], "shift": settings.comfyui_image_shift}},
+            "5": {"class_type": "CLIPTextEncode", "inputs": {
+                "text": request.prompt, "clip": ["2", 0]}},
+            "6": {"class_type": "CLIPTextEncode", "inputs": {
+                "text": negative, "clip": ["2", 0]}},
+            "7": {"class_type": "EmptySD3LatentImage", "inputs": {
+                "width": width, "height": height, "batch_size": 1}},
+            "8": {"class_type": "KSampler", "inputs": {
+                "model": ["4", 0], "seed": seed,
+                "steps": settings.comfyui_image_steps,
+                "cfg": settings.comfyui_image_cfg,
+                "sampler_name": "euler", "scheduler": "simple",
+                "positive": ["5", 0], "negative": ["6", 0],
+                "latent_image": ["7", 0], "denoise": 1.0}},
+            "9": {"class_type": "VAEDecode", "inputs": {
+                "samples": ["8", 0], "vae": ["3", 0]}},
+            "10": {"class_type": "SaveImage", "inputs": {
+                "images": ["9", 0], "filename_prefix": prefix}},
+        }
+
+    async def generate(self, request: ImageGenerationRequest) -> list[GeneratedImage]:
+        base = settings.comfyui_base_url.rstrip("/")
+        timeout = httpx.Timeout(60.0, read=120.0)
+        images: list[GeneratedImage] = []
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            health = await client.get(f"{base}/system_stats")
+            health.raise_for_status()
+            await _prepare_comfyui_model(client, base, "qwen-image")
+            for index in range(max(1, request.count)):
+                seed = (
+                    int(request.seed) + index
+                    if request.seed is not None
+                    else random.SystemRandom().randrange(0, 2**48)
+                )
+                prefix = f"image/Takecraft_{uuid.uuid4().hex[:10]}"
+                workflow = self._workflow(request, seed, prefix)
+                queued = await client.post(
+                    f"{base}/prompt",
+                    json={"prompt": workflow, "client_id": f"takecraft-{uuid.uuid4()}"},
+                )
+                if queued.is_error:
+                    raise RuntimeError(f"DGX Qwen-Image 工作流提交失败: {queued.text[:1500]}")
+                prompt_id = queued.json()["prompt_id"]
+                deadline = asyncio.get_running_loop().time() + settings.comfyui_timeout
+                while asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(POLL_INTERVAL)
+                    response = await client.get(f"{base}/history/{prompt_id}")
+                    response.raise_for_status()
+                    record = response.json().get(prompt_id)
+                    if not record:
+                        continue
+                    status = record.get("status", {})
+                    if status.get("status_str") == "error":
+                        messages = [
+                            message[1]
+                            for message in status.get("messages", [])
+                            if message[0] == "execution_error"
+                        ]
+                        raise RuntimeError(
+                            f"DGX Qwen-Image 生成失败: "
+                            f"{(messages[-1] if messages else status)}"
+                        )
+                    files = record.get("outputs", {}).get("10", {}).get("images") or []
+                    if not files:
+                        raise RuntimeError(
+                            f"DGX Qwen-Image 完成但没有图片输出: {record.get('outputs', {})}"
+                        )
+                    item = files[0]
+                    result = await client.get(
+                        f"{base}/view",
+                        params={
+                            "filename": item["filename"],
+                            "subfolder": item.get("subfolder", ""),
+                            "type": item.get("type", "output"),
+                        },
+                    )
+                    result.raise_for_status()
+                    self.workdir.mkdir(parents=True, exist_ok=True)
+                    destination = self.workdir / f"dgx_{prompt_id}_{index:02d}.png"
+                    destination.write_bytes(result.content)
+                    await client.post(f"{base}/history", json={"delete": [prompt_id]})
+                    images.append(
+                        GeneratedImage(
+                            path=str(destination),
+                            model=self.name,
+                            seed=seed,
+                            width=max(256, (int(request.width) // 16) * 16),
+                            height=max(256, (int(request.height) // 16) * 16),
+                        )
+                    )
+                    break
+                else:
+                    raise TimeoutError(f"DGX Qwen-Image 任务 {prompt_id} 超过等待时间")
+        return images
 
 class _CloudVideoBackend:
     """云视频后端公共骨架：submit→status→result 三段式 + 进程内任务表。"""
@@ -359,6 +495,7 @@ class ComfyUIVideoGenerator(_CloudVideoBackend):
         async with httpx.AsyncClient(timeout=timeout) as client:
             health = await client.get(f"{base}/system_stats")
             health.raise_for_status()
+            await _prepare_comfyui_model(client, base, "minimax-h3")
             mime = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
             upload = await client.post(
                 f"{base}/upload/image",

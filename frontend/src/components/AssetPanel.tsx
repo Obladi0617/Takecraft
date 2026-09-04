@@ -33,9 +33,8 @@ const VIEW_LABEL: Record<string, string> = {
   FRONT: '正面',
   SIDE: '侧面',
   BACK: '背面',
-  ESTABLISHING: '全景',
-  KEY_ANGLE_A: '主角度 A',
-  KEY_ANGLE_B: '主角度 B',
+  ESTABLISHING: '主角度',
+  KEY_ANGLE_A: '角度 A',
   DETAIL: '细节',
 }
 

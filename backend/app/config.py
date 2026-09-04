@@ -15,13 +15,16 @@ class Settings(BaseSettings):
             "http://127.0.0.1:5173",
         ]
     )
-    image_backend: str = "mock"  # mock | modelscope
+    image_backend: str = "mock"  # mock | modelscope | comfyui
     video_backend: str = "mock"  # mock | image_motion | comfyui | minimax | modelscope
-    image_generation_concurrency: int = 1  # ModelScope AIGC 动态限流，默认串行
+    image_generation_concurrency: int = 1  # 图片模型占用较大，默认串行
     video_generation_concurrency: int = 1  # 规格书第 24 节
     comfyui_base_url: str = "http://127.0.0.1:8188"
     comfyui_timeout: float = 3600.0
     comfyui_megapixels: float = 0.4
+    comfyui_image_steps: int = 20
+    comfyui_image_cfg: float = 4.0
+    comfyui_image_shift: float = 3.1
 
     # 云端 API（规格补丁：云本地协同；Key 缺失时相应后端不可用）
     minimax_api_key: str = ""

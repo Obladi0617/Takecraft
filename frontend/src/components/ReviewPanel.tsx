@@ -10,6 +10,13 @@ import {
 } from '../api/client'
 import { useAppStore } from '../stores/app'
 
+const LOCATION_REVIEW_VIEWS = new Set(['ESTABLISHING', 'KEY_ANGLE_A', 'DETAIL'])
+const LOCATION_VIEW_LABEL: Record<string, string> = {
+  ESTABLISHING: '主角度',
+  KEY_ANGLE_A: '角度 A',
+  DETAIL: '细节',
+}
+
 export default function ReviewPanel() {
   const projectId = useAppStore((s) => s.projectId)!
   const queryClient = useQueryClient()
@@ -186,12 +193,16 @@ export default function ReviewPanel() {
                     )}
                     <span className={`badge ${loc.status === 'LOCKED' ? 'ok' : ''}`}>{loc.status}</span>
                     <div className="asset-refs review-asset-refs">
-                      {(assetBundle?.locations.find((item) => item.id === loc.id)?.references ?? []).map((ref) => (
-                        <div key={ref.id} className="asset-view">
-                          <img src={`${API_BASE}${ref.media_url}`} alt={`${loc.name} ${ref.view}`} />
-                          <div className="asset-view-foot"><span>{ref.view}</span></div>
-                        </div>
-                      ))}
+                      {(assetBundle?.locations.find((item) => item.id === loc.id)?.references ?? [])
+                        .filter((ref) => LOCATION_REVIEW_VIEWS.has(ref.view ?? ''))
+                        .map((ref) => (
+                          <div key={ref.id} className="asset-view">
+                            <img src={`${API_BASE}${ref.media_url}`} alt={`${loc.name} ${ref.view}`} />
+                            <div className="asset-view-foot">
+                              <span>{LOCATION_VIEW_LABEL[ref.view ?? ''] ?? ref.view}</span>
+                            </div>
+                          </div>
+                        ))}
                     </div>
                   </div>
                 ))}

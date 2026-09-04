@@ -1,7 +1,7 @@
 from ..config import settings
 from ..db import project_path
 from .base import ImageGenerator, VideoGenerator
-from .cloud import ComfyUIVideoGenerator, ModelScopeImageGenerator, ModelScopeVideoGenerator, MiniMaxVideoGenerator
+from .cloud import ComfyUIImageGenerator, ComfyUIVideoGenerator, ModelScopeImageGenerator, ModelScopeVideoGenerator, MiniMaxVideoGenerator
 from .mock import ImageMotionVideoGenerator, MockImageGenerator, MockVideoGenerator
 
 
@@ -12,6 +12,8 @@ def get_image_generator(project_id: str, subdir: str = "storyboards") -> ImageGe
         return MockImageGenerator(workdir)
     if backend == "modelscope":
         return ModelScopeImageGenerator(workdir)
+    if backend == "comfyui":
+        return ComfyUIImageGenerator(workdir)
     raise ValueError(f"未知图像后端: {backend}")
 
 

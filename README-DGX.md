@@ -1,11 +1,12 @@
 # Takecraft + DGX Spark 使用指南
 
-本项目的正式测试链路是：ModelScope 生成剧本与分镜图，DGX Spark 上的 ComfyUI + MiniMax H3 将分镜图生成带声音的 AI 视频，本机 FFmpeg 完成代理、选片和成片渲染。
+本项目的正式测试链路是：ModelScope 生成文字剧本，DGX Spark 上的 ComfyUI + Qwen-Image 生成角色、场景与分镜图，再由 MiniMax H3 将分镜图生成带声音的 AI 视频，本机 FFmpeg 完成代理、选片和成片渲染。
 
 ## 已验证配置
 
 - DGX SSH：`Developer@106.13.186.155:6057`
 - ComfyUI：DGX 本机 `127.0.0.1:8188`
+- 图片模型：`qwen_image_fp8_e4m3fn.safetensors` + `qwen_2.5_vl_7b_fp8_scaled.safetensors`
 - 视频模型：`minimax_h3_fl2va_pruned_int8_convrot.safetensors`
 - 输出：约 864×480、24 FPS、H.264 + AAC
 - 前端：`http://127.0.0.1:5173`
@@ -73,7 +74,7 @@ Start-Takecraft-ModelScope.cmd
 
 ```text
 FILMAGENT_LLM_BACKEND=openai
-FILMAGENT_IMAGE_BACKEND=modelscope
+FILMAGENT_IMAGE_BACKEND=comfyui
 FILMAGENT_VIDEO_BACKEND=comfyui
 FILMAGENT_COMFYUI_BASE_URL=http://127.0.0.1:8188
 ```
@@ -84,10 +85,11 @@ FILMAGENT_COMFYUI_BASE_URL=http://127.0.0.1:8188
 
 1. 新建 `AUTO` 项目。
 2. 输入一句话创意，启动全自动流程。
-3. 等待剧本、资产设计和分镜完成。
-4. 视频阶段会把锁定分镜上传至 DGX，并调用 MiniMax H3。
-5. 单条视频通常需要数分钟；多个镜头会依次排队。
-6. 系统自动下载 Take、审核、选片、剪辑并渲染最终 MP4。
+3. 审核剧本后，等待 DGX 生成资产参考图；场景固定为主角度、角度 A、细节三张。
+4. 审核资产和分镜；每次图片/视频阶段切换时系统会释放上一个模型的内存（不会删除权重）。
+5. 视频阶段会把锁定分镜上传至 DGX，并调用 MiniMax H3。
+6. 单条视频通常需要数分钟；多个镜头会依次排队。
+7. 系统自动下载 Take、审核、选片、剪辑并渲染最终 MP4。
 
 运行期间不要关闭 SSH 隧道、DGX ComfyUI 或 Takecraft 后端。
 

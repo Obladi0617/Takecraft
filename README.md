@@ -154,8 +154,8 @@ npm run dev
 | `FILMAGENT_DATA_DIR` | `<repo>/data` | 所有项目数据根目录（已被 .gitignore 忽略） |
 | `FILMAGENT_PROXY_HEIGHT` | `720` | Proxy 转码高度 |
 | `FILMAGENT_CORS_ORIGINS` | `["http://localhost:5173","http://127.0.0.1:5173"]` | 额外允许的跨域来源；`localhost/127.0.0.1` 任意端口已由正则放行 |
-| `FILMAGENT_IMAGE_BACKEND` | `mock` | `mock` \| `modelscope` |
-| `FILMAGENT_VIDEO_BACKEND` | `mock` | `mock` \| `minimax` \| `modelscope` |
+| `FILMAGENT_IMAGE_BACKEND` | `mock` | `mock` \| `modelscope` \| `comfyui`（DGX Qwen-Image） |
+| `FILMAGENT_VIDEO_BACKEND` | `mock` | `mock` \| `image_motion` \| `comfyui` \| `minimax` \| `modelscope` |
 | `FILMAGENT_VIDEO_GENERATION_CONCURRENCY` | `1` | VIDEO 任务并发信号量（§24）。云后端请按配额调整 |
 | `FILMAGENT_MAX_AUTO_RETAKE_ROUNDS` | `2` | 单镜头自动重拍上限（§12） |
 | `FILMAGENT_LLM_BACKEND` | `mock` | `mock` \| `openai`（任意 OpenAI 兼容端点） |
@@ -259,7 +259,7 @@ Windows 已配置上述用户环境变量后，可双击 `Start-Takecraft-ModelS
 | POST | `/projects/{pid}/characters/{cid}/lock` | 锁定：编译 `prompt_block` + `hash`、固化 `seed`、`version+1`，随后自动重跑 Shot 引用 |
 | POST | `/projects/{pid}/locations` | 手工建场景资产（可带 `scene_id`） |
 | PATCH | `/projects/{pid}/locations/{lid}` | 改场景资产；LOCKED 返回 409（同上） |
-| POST | `/projects/{pid}/locations/{lid}/references/generate` | 入队生成 ESTABLISHING / KEY_ANGLE_A / KEY_ANGLE_B / DETAIL（`job_type=LOCATION`） |
+| POST | `/projects/{pid}/locations/{lid}/references/generate` | 入队生成 ESTABLISHING / KEY_ANGLE_A / DETAIL（`job_type=LOCATION`） |
 | POST | `/projects/{pid}/locations/{lid}/references` | 上传场景参考图（同样按 view 替换） |
 | POST | `/projects/{pid}/locations/{lid}/lock` | 锁定场景资产 + 重跑 Shot 引用 |
 
@@ -474,7 +474,7 @@ data/
     ├── project.json            项目元信息快照（write_project_json）
     ├── assets/
     │   ├── characters/         角色三视图 char_001_FRONT.png / _SIDE / _BACK / _upload
-    │   ├── locations/          场景参考图 loc_001_ESTABLISHING.png / _KEY_ANGLE_A/B / _DETAIL
+    │   ├── locations/          场景参考图 loc_001_ESTABLISHING.png / _KEY_ANGLE_A / _DETAIL
     │   ├── references/         （预留）
     │   ├── audio/              （预留：BGM / 配音）
     │   └── imported_video/     （预留）
@@ -595,7 +595,7 @@ watch -n5 "curl -s http://127.0.0.1:8765/api/v1/projects/$PID/pipeline"
 # 4) 资产链验收点
 curl -s "http://127.0.0.1:8765/api/v1/projects/$PID/assets"
 #   - characters/locations 均为 LOCKED，有 prompt_block、prompt_block_hash、seed
-#   - 每个角色 3 张三视图、每个场景 4 张参考图，media_url 可直接打开
+#   - 每个角色 3 张三视图、每个场景 3 张参考图（主角度、角度 A、细节），media_url 可直接打开
 curl -s "http://127.0.0.1:8765/api/v1/projects/$PID/shots"
 #   - 每个 shot 的 character_ids 非空、location_id 指向对应场景
 curl -s "http://127.0.0.1:8765/api/v1/projects/$PID/shots/shot_001/storyboards"
