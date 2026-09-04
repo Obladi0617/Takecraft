@@ -309,5 +309,18 @@ export interface HumanReviewState {
   storyboard_candidates_id: string | null
   storyboard_decisions: Record<string, HumanDecision>
   storyboards: StoryboardInfo[]
+  takes: Array<{
+    id: string
+    shot_id: string
+    shot_title: string
+    shot_description: string
+    duration: number | null
+    prompt: string
+    model: string
+    media_url: string
+    is_latest: boolean
+    is_selected: boolean
+    decision: HumanDecision | null
+  }>
   take_decisions: Record<string, HumanDecision>
 }

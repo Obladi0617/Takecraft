@@ -280,6 +280,31 @@ def human_review_state(
             "framing": storyboard_shot.framing if storyboard_shot else "",
             "camera_motion": storyboard_shot.camera_motion if storyboard_shot else "",
         })
+    takes = []
+    for shot in session.exec(
+        select(Shot).where(Shot.project_id == project_id).order_by(Shot.index)
+    ):
+        shot_takes = list(session.exec(
+            select(Take)
+            .where(Take.project_id == project_id, Take.shot_id == shot.id)
+            .order_by(Take.index)
+        ))
+        latest_id = shot_takes[-1].id if shot_takes else None
+        for take in shot_takes:
+            media_path = (take.proxy_path or take.original_path).replace('\\', '/')
+            takes.append({
+                "id": take.id,
+                "shot_id": shot.id,
+                "shot_title": shot.title,
+                "shot_description": shot.description,
+                "duration": take.duration,
+                "prompt": take.prompt,
+                "model": take.model,
+                "media_url": f"/media/{project_id}/{media_path}",
+                "is_latest": take.id == latest_id,
+                "is_selected": take.id == shot.selected_take_id,
+                "decision": take_decisions.get(take.id),
+            })
     return {
         "stage": project.status,
         "screenplay_id": screenplay.id if screenplay else None,
@@ -293,6 +318,7 @@ def human_review_state(
         "storyboard_candidates_id": sb_candidates.id if sb_candidates else None,
         "storyboard_decisions": sb_decisions,
         "storyboards": storyboards,
+        "takes": takes,
         "take_decisions": take_decisions,
     }
 

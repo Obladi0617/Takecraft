@@ -24,7 +24,7 @@ export default function App() {
     refetchInterval: 1200,
   })
 
-  const needsReview = humanReview && ['SCRIPT_REVIEW', 'ASSET_REVIEW', 'STORYBOARD_REVIEW'].includes(humanReview.stage)
+  const needsReview = humanReview && ['SCRIPT_REVIEW', 'ASSET_REVIEW', 'STORYBOARD_REVIEW', 'HUMAN_TAKE_REVIEW'].includes(humanReview.stage)
   useEffect(() => {
     const stage = humanReview?.stage
     if (stage !== previousStage.current) {

@@ -7,6 +7,7 @@ import {
   submitScriptReview,
   submitAssetReview,
   submitStoryboardReview,
+  submitTakeReview,
   selectStoryboard,
 } from '../api/client'
 import { useAppStore } from '../stores/app'
@@ -28,6 +29,7 @@ export default function ReviewPanel() {
   const [shotFeedback, setShotFeedback] = useState<Record<string, string>>({})
   const [previewImage, setPreviewImage] = useState<{ url: string; alt: string } | null>(null)
   const [expandedShots, setExpandedShots] = useState<string[]>([])
+  const [takeFeedback, setTakeFeedback] = useState<Record<string, string>>({})
 
   useEffect(() => {
     if (!previewImage) return
@@ -96,6 +98,17 @@ export default function ReviewPanel() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
       queryClient.invalidateQueries({ queryKey: ['shots', projectId] })
+    },
+  })
+
+  const reviewTake = useMutation({
+    mutationFn: ({ takeId, decision }: { takeId: string; decision: 'APPROVE' | 'RETAKE' }) =>
+      submitTakeReview(projectId, takeId, decision, takeFeedback[takeId] ?? ''),
+    onSuccess: (_, variables) => {
+      setTakeFeedback((current) => ({ ...current, [variables.takeId]: '' }))
+      queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['pipeline', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['jobs', projectId] })
     },
   })
 
@@ -371,6 +384,56 @@ export default function ReviewPanel() {
           </div>
           {imageModal}
         </div>
+      </div>
+    )
+  }
+
+  // Take 人工复审：集中展示所有镜头，无需逐个进入镜头工作台。
+  if (stage === 'HUMAN_TAKE_REVIEW') {
+    const latestTakes = (humanReview.takes ?? []).filter((take) => take.is_latest)
+    return (
+      <div className="review-panel">
+        <h3>Take 人工复审</h3>
+        <p className="review-explainer">
+          请逐条播放最新 Take。满意就“人工通过”；不满意请写清修改方向后打回，系统只重拍这一条。
+          所有镜头通过后才会自动进入剪辑。
+        </p>
+        <div className="take-review-grid">
+          {latestTakes.map((take) => (
+            <div key={take.id} className={`take-review-card ${take.decision?.decision === 'APPROVE' ? 'approved' : ''}`}>
+              <div className="take-review-heading">
+                <strong>{take.shot_title || take.shot_id}</strong>
+                <span>{take.duration?.toFixed(1) ?? '-'} 秒</span>
+                {take.decision?.decision === 'APPROVE' && <span className="badge ok">已人工通过</span>}
+              </div>
+              <video src={`${API_BASE}${take.media_url}`} controls preload="metadata" />
+              <details>
+                <summary>查看镜头文字与视频提示词</summary>
+                <p><strong>画面内容：</strong>{take.shot_description}</p>
+                <p><strong>视频提示词：</strong>{take.prompt}</p>
+              </details>
+              <textarea
+                placeholder="不满意时填写具体修改方向，例如：动作太快、主体偏离画面、雷电太弱"
+                value={takeFeedback[take.id] ?? ''}
+                onChange={(event) => setTakeFeedback((current) => ({ ...current, [take.id]: event.target.value }))}
+              />
+              <div className="action-buttons">
+                <button
+                  className={take.decision?.decision === 'APPROVE' ? 'primary' : ''}
+                  disabled={reviewTake.isPending || take.decision?.decision === 'APPROVE'}
+                  onClick={() => reviewTake.mutate({ takeId: take.id, decision: 'APPROVE' })}
+                >{take.decision?.decision === 'APPROVE' ? '✓ 已通过' : '人工通过这条'}</button>
+                <button
+                  disabled={reviewTake.isPending || !(takeFeedback[take.id] ?? '').trim()}
+                  onClick={() => reviewTake.mutate({ takeId: take.id, decision: 'RETAKE' })}
+                >按意见打回，只重拍这条</button>
+              </div>
+              {take.decision?.feedback && <p className="muted">上次意见：{take.decision.feedback}</p>}
+            </div>
+          ))}
+          {latestTakes.length === 0 && <p className="muted">Take 正在生成，完成后会自动显示在这里。</p>}
+        </div>
+        {reviewTake.isError && <p className="error">提交失败：{String(reviewTake.error)}</p>}
       </div>
     )
   }
