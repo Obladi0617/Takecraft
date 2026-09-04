@@ -78,3 +78,17 @@ def make_proxy(src: Path, dst: Path, height: int | None = None) -> Path | None:
     if result.returncode != 0:
         return None
     return dst
+
+
+def extract_tail_frame(src: Path, dst: Path, offset: float = 0.12) -> Path | None:
+    """提取片尾前的清晰帧，供同场景下一镜作为首帧。"""
+    if not FFMPEG or not src.is_file():
+        return None
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [FFMPEG, "-y", "-sseof", f"-{max(offset, 0.04):.3f}", "-i", str(src),
+         "-frames:v", "1", str(dst)],
+        capture_output=True,
+        text=True,
+    )
+    return dst if result.returncode == 0 and dst.is_file() else None

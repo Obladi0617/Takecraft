@@ -6,11 +6,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from ..db import get_engine, project_session
+from ..db import abs_path, get_engine, project_session
 from ..agents import get_text_model
 from ..agents.film_agents import revise_video_prompt
 from ..compliance import compliance_gate
-from ..domain import AgentArtifact, GenerationJob, Project, Shot, Storyboard, Take
+from ..domain import AgentArtifact, Asset, Character, GenerationJob, Location, Project, Shot, Storyboard, Take
+from ..domain.character import TURNAROUND_VIEWS
+from ..domain.location import LOCATION_REF_KINDS
 from ..jobs import generation_queue
 from ..graph.film_graph import resume_film_pipeline, run_film_pipeline
 from ..repositories import next_seq_and_id
@@ -23,6 +25,7 @@ ACTIVE_STATUSES = {"PENDING", "RUNNING"}
 class HumanReviewIn(BaseModel):
     decision: str
     feedback: str = ""
+    target_shot_ids: list[str] = []
 
 
 def _latest_artifact(
@@ -328,6 +331,37 @@ def submit_asset_review(
     loc_cards = _latest_artifact(session, project_id, "location_cards")
     if char_cards is None or loc_cards is None:
         raise HTTPException(status_code=409, detail="尚无可审核资产")
+    if decision == "APPROVE":
+        refs = list(session.exec(select(Asset).where(Asset.project_id == project_id)))
+        missing: list[str] = []
+        owners_and_views = [
+            *(
+                (owner, TURNAROUND_VIEWS)
+                for owner in session.exec(
+                    select(Character).where(Character.project_id == project_id)
+                )
+            ),
+            *(
+                (owner, LOCATION_REF_KINDS)
+                for owner in session.exec(
+                    select(Location).where(Location.project_id == project_id)
+                )
+            ),
+        ]
+        for owner, expected_views in owners_and_views:
+            present = {
+                ref.meta.get("view")
+                for ref in refs
+                if ref.meta.get("owner_id") == owner.id
+            }
+            absent = [view for view in expected_views if view not in present]
+            if absent:
+                missing.append(f"{owner.name}（缺少 {', '.join(absent)}）")
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail=f"以下资产尚无参考图，不能进入分镜：{'、'.join(missing)}",
+            )
     artifact = record_artifact(
         session,
         project_id,
@@ -366,7 +400,8 @@ def submit_storyboard_review(
         project_id,
         "human_storyboard_review",
         "human",
-        {"decision": decision, "feedback": body.feedback.strip()},
+        {"decision": decision, "feedback": body.feedback.strip(),
+         "target_shot_ids": body.target_shot_ids},
         sb_candidates.id,
     )
     return {"ok": True, "review_id": artifact.id, "decision": decision}
@@ -391,15 +426,15 @@ async def submit_take_review(
     if shot is None:
         raise HTTPException(status_code=404, detail="shot not found")
 
-    review = record_artifact(
-        session,
-        project_id,
-        "human_take_review",
-        "human",
-        {"decision": decision, "feedback": body.feedback.strip(), "shot_id": shot.id},
-        take.id,
-    )
     if decision == "APPROVE":
+        review = record_artifact(
+            session,
+            project_id,
+            "human_take_review",
+            "human",
+            {"decision": decision, "feedback": body.feedback.strip(), "shot_id": shot.id},
+            take.id,
+        )
         shot.selected_take_id = take.id
         shot.status = "HUMAN_APPROVED"
         session.add(shot)
@@ -416,6 +451,14 @@ async def submit_take_review(
     ).first()
     if active is not None:
         raise HTTPException(status_code=409, detail=f"该镜头已有生成任务: {active.id}")
+    review = record_artifact(
+        session,
+        project_id,
+        "human_take_review",
+        "human",
+        {"decision": decision, "feedback": body.feedback.strip(), "shot_id": shot.id},
+        take.id,
+    )
     screenplay = _latest_artifact(session, project_id, "screenplay")
     storyboard = session.get(Storyboard, shot.storyboard_id) if shot.storyboard_id else None
     prompt = await revise_video_prompt(
@@ -434,6 +477,32 @@ async def submit_take_review(
         body.feedback.strip(),
     )
     compliance_gate.check_or_raise(prompt, "take.human_retake", project_id)
+    # Keep continuity on manual retakes too: use the previous shot's approved
+    # (or newest available) Take tail frame when it exists in the same scene.
+    first_frame: str | None = None
+    scene_shots = list(
+        session.exec(
+            select(Shot)
+            .where(Shot.project_id == project_id, Shot.scene_id == shot.scene_id)
+            .order_by(Shot.index)
+        )
+    )
+    position = next((i for i, item in enumerate(scene_shots) if item.id == shot.id), -1)
+    if position > 0:
+        previous_shot = scene_shots[position - 1]
+        previous_take = (
+            session.get(Take, previous_shot.selected_take_id)
+            if previous_shot.selected_take_id
+            else session.exec(
+                select(Take)
+                .where(Take.project_id == project_id, Take.shot_id == previous_shot.id)
+                .order_by(Take.index.desc())
+            ).first()
+        )
+        if previous_take is not None:
+            tail_path = abs_path(project_id, f"frames/{previous_take.id}_tail.png")
+            if tail_path.exists():
+                first_frame = str(tail_path)
     index, job_id = next_seq_and_id(session, GenerationJob, project_id, "job")
     job = GenerationJob(
         id=job_id,
@@ -447,9 +516,13 @@ async def submit_take_review(
             "prompt": prompt,
             "human_feedback": body.feedback.strip(),
             "replaces_take_id": take.id,
+            "first_frame": first_frame,
         },
     )
     session.add(job)
+    # A rejected Take invalidates the previous selection immediately.  Without
+    # this, the graph can observe an older APPROVE record and skip the new job.
+    shot.selected_take_id = None
     shot.status = "GENERATING"
     session.add(shot)
     session.commit()

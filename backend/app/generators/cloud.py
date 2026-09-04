@@ -511,7 +511,8 @@ class ComfyUIVideoGenerator(_CloudVideoBackend):
             seed = random.SystemRandom().randrange(0, 2**48)
             workflow["114"]["inputs"]["image"] = image_name
             workflow["104"]["inputs"]["prompt"] = request.prompt
-            workflow["111"]["inputs"]["value"] = max(5.0, float(request.duration))
+            # H3 对齐到合法潜空间帧数；不要在适配层把所有镜头强制成五秒。
+            workflow["111"]["inputs"]["value"] = max(1.0, float(request.duration))
             workflow["115"]["inputs"]["aspect_ratio"] = "16:9 (Widescreen)"
             workflow["115"]["inputs"]["megapixels"] = settings.comfyui_megapixels
             workflow["15"]["inputs"]["noise_seed"] = seed

@@ -24,18 +24,21 @@ CHARACTER_ASSET_TYPE = "CHARACTER_TURNAROUND"
 LOCATION_ASSET_TYPE = "LOCATION_REFERENCE"
 
 VIEW_LABELS = {
-    "FRONT": "正面全身视图",
-    "SIDE": "侧面全身视图",
-    "BACK": "背面全身视图",
-    "ESTABLISHING": "全景建立视图",
-    "KEY_ANGLE_A": "主角度 A 视图",
-    "KEY_ANGLE_B": "主角度 B 视图",
-    "DETAIL": "局部细节参考图",
+    "FRONT": "严格正面全身视图，人物正对镜头，完整展示头到脚",
+    "SIDE": "严格九十度侧面全身视图，仅展示侧面轮廓，禁止正面构图",
+    "BACK": "严格背面全身视图，人物背对镜头，清楚展示背部结构",
+    "ESTABLISHING": "场景主角度全景，广角建立镜头，展示完整空间布局",
+    "KEY_ANGLE_A": "场景角度 A，从主角度横向改变约四十五度，展示明显不同的空间透视",
+    "KEY_ANGLE_B": "场景反向角度，展示与主角度明显不同的空间关系",
+    "DETAIL": "场景细节特写，仅聚焦关键材质、道具和纹理，禁止重复全景构图",
 }
 
 
 def view_prompt(base: str, view: str) -> str:
-    return f"{base}，{VIEW_LABELS.get(view, view)}"
+    return (
+        f"{base}，{VIEW_LABELS.get(view, view)}。"
+        "必须严格遵守当前视角类型，并与同组其他视角在构图和景别上可明显区分。"
+    )
 
 
 MAX_CHARACTERS_PER_SHOT = 3

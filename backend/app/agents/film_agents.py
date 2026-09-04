@@ -30,8 +30,8 @@ BIBLE_SYSTEM = """你是导演。基于剧本输出导演圣经 JSON，结构：
 规则各 2~3 条，中文。只输出 JSON。"""
 
 PLAN_SYSTEM = """你是制片人。基于剧本输出生产计划 JSON，结构：
-{"batch_strategy": "...", "default_take_count": 2, "shot_priorities": {"<镜头标题>": "CRITICAL|HIGH|NORMAL|LOW"}}
-default_take_count 取 1~4。中文。只输出 JSON。"""
+{"batch_strategy": "...", "default_take_count": 1, "shot_priorities": {"<镜头标题>": "CRITICAL|HIGH|NORMAL|LOW"}}
+default_take_count 固定为 1；每条生成后交给人工复审，不自动抽取多个重复 Take。中文。只输出 JSON。"""
 
 CHARACTER_SYSTEM = """你是角色设计师。从剧本中提取主要角色并输出角色卡 JSON，结构：
 {"characters": [{"name": "...", "gender": "男|女|其他", "age_range": "...", "role": "PRIMARY|SUPPORTING",
@@ -239,7 +239,7 @@ async def producer_plan(model: TextModel, idea: str, screenplay: dict) -> dict:
             for scene in screenplay.get("scenes", [])
             for shot in scene.get("shots", [])
         }
-        return {"batch_strategy": "按场景顺序生成", "default_take_count": 2, "shot_priorities": priorities}
+        return {"batch_strategy": "按场景顺序生成", "default_take_count": 1, "shot_priorities": priorities}
 
 
 async def character_cards(model: TextModel, screenplay: dict) -> list[dict]:

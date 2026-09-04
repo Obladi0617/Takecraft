@@ -24,7 +24,7 @@ class ProjectCreate(BaseModel):
     name: str
     idea: str | None = None
     mode: str = "AUTO"
-    default_take_count: int = 4
+    default_take_count: int = 1
 
 
 def _load_registry() -> list[dict]:

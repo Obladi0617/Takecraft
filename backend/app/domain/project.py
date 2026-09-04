@@ -11,6 +11,6 @@ class Project(SQLModel, table=True):
     idea: str | None = None
     mode: str = Field(default="AUTO")  # AUTO | DIRECTOR
     status: str = Field(default="PROJECT_CREATED")
-    default_take_count: int = Field(default=4)
+    default_take_count: int = Field(default=1)
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)

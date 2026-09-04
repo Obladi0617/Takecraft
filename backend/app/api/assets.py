@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 
 from ..compliance import compliance_gate
 from ..db import project_session
-from ..domain import Character, Location, Scene
+from ..domain import Asset, Character, Location, Scene, Shot
 from ..domain.character import CHARACTER_SOURCES, TURNAROUND_VIEWS
 from ..domain.location import LOCATION_REF_KINDS, LOCATION_SOURCES
 from ..repositories import next_seq_and_id
@@ -114,7 +114,14 @@ def _get_location(session: Session, project_id: str, location_id: str) -> Locati
 
 def _assert_editable(owner: Character | Location) -> None:
     if owner.status == "LOCKED":
-        raise HTTPException(status_code=409, detail="资产已锁定，请先重新生成参考图后再确认")
+        # 修改已锁定资产时自动退回待确认，旧参考图仍可查看或重新生成。
+        owner.status = "PENDING_CONFIRM"
+
+
+def _delete_references(session: Session, project_id: str, owner_id: str) -> None:
+    """只删除数据库引用；磁盘原图保留，避免误删用户素材。"""
+    for asset in refs_of(session, project_id, owner_id):
+        session.delete(asset)
 
 
 @router.get("/assets")
@@ -219,6 +226,22 @@ def update_character(
         **character.model_dump(),
         "references": _refs(session, project_id, character.id),
     }
+
+
+@router.delete("/characters/{character_id}", status_code=204)
+def delete_character(
+    project_id: str,
+    character_id: str,
+    session: Session = Depends(project_session),
+):
+    character = _get_character(session, project_id, character_id)
+    _delete_references(session, project_id, character_id)
+    for shot in session.exec(select(Shot).where(Shot.project_id == project_id)):
+        if character_id in shot.character_ids:
+            shot.character_ids = [cid for cid in shot.character_ids if cid != character_id]
+            session.add(shot)
+    session.delete(character)
+    session.commit()
 
 
 @router.post("/characters/{character_id}/references/generate", status_code=202)
@@ -350,6 +373,22 @@ def update_location(
         **location.model_dump(),
         "references": _refs(session, project_id, location.id),
     }
+
+
+@router.delete("/locations/{location_id}", status_code=204)
+def delete_location(
+    project_id: str,
+    location_id: str,
+    session: Session = Depends(project_session),
+):
+    location = _get_location(session, project_id, location_id)
+    _delete_references(session, project_id, location_id)
+    for shot in session.exec(select(Shot).where(Shot.project_id == project_id)):
+        if shot.location_id == location_id:
+            shot.location_id = None
+            session.add(shot)
+    session.delete(location)
+    session.commit()
 
 
 @router.post("/locations/{location_id}/references/generate", status_code=202)

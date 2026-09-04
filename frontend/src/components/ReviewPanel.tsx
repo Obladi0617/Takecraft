@@ -23,6 +23,7 @@ export default function ReviewPanel() {
   const [scriptFeedback, setScriptFeedback] = useState('')
   const [assetFeedback, setAssetFeedback] = useState('')
   const [storyboardFeedback, setStoryboardFeedback] = useState('')
+  const [shotFeedback, setShotFeedback] = useState<Record<string, string>>({})
 
   const { data: humanReview } = useQuery({
     queryKey: ['human-review', projectId],
@@ -58,8 +59,9 @@ export default function ReviewPanel() {
   })
 
   const storyboardReview = useMutation({
-    mutationFn: (decision: 'APPROVE' | 'REVISE') =>
-      submitStoryboardReview(projectId, decision, storyboardFeedback),
+    mutationFn: ({ decision, feedback = storyboardFeedback, shotIds = [] }: {
+      decision: 'APPROVE' | 'REVISE'; feedback?: string; shotIds?: string[]
+    }) => submitStoryboardReview(projectId, decision, feedback, shotIds),
     onSuccess: () => {
       setStoryboardFeedback('')
       queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
@@ -162,7 +164,9 @@ export default function ReviewPanel() {
                   <div className="asset-refs review-asset-refs">
                     {(assetBundle?.characters.find((item) => item.id === char.id)?.references ?? []).map((ref) => (
                       <div key={ref.id} className="asset-view">
-                        <img src={`${API_BASE}${ref.media_url}`} alt={`${char.name} ${ref.view}`} />
+                        <a href={`${API_BASE}${ref.media_url}`} target="_blank" rel="noreferrer">
+                          <img src={`${API_BASE}${ref.media_url}`} alt={`${char.name} ${ref.view}`} title="点击查看原图" />
+                        </a>
                         <div className="asset-view-foot"><span>{ref.view}</span></div>
                       </div>
                     ))}
@@ -197,7 +201,9 @@ export default function ReviewPanel() {
                         .filter((ref) => LOCATION_REVIEW_VIEWS.has(ref.view ?? ''))
                         .map((ref) => (
                           <div key={ref.id} className="asset-view">
-                            <img src={`${API_BASE}${ref.media_url}`} alt={`${loc.name} ${ref.view}`} />
+                            <a href={`${API_BASE}${ref.media_url}`} target="_blank" rel="noreferrer">
+                              <img src={`${API_BASE}${ref.media_url}`} alt={`${loc.name} ${ref.view}`} title="点击查看原图" />
+                            </a>
                             <div className="asset-view-foot">
                               <span>{LOCATION_VIEW_LABEL[ref.view ?? ''] ?? ref.view}</span>
                             </div>
@@ -253,7 +259,9 @@ export default function ReviewPanel() {
             <div className="storyboard-grid">
               {humanReview.storyboards.map((sb) => (
                 <div key={sb.id} className={`storyboard-card ${sb.is_locked ? 'locked' : ''}`}>
-                  <img src={`${API_BASE}${sb.media_url}`} alt={sb.id} />
+                  <a href={`${API_BASE}${sb.media_url}`} target="_blank" rel="noreferrer">
+                    <img src={`${API_BASE}${sb.media_url}`} alt={sb.id} title="点击查看原图" />
+                  </a>
                   <div className="storyboard-meta">
                     <strong>镜头 {sb.shot_id}</strong>
                     <span className="muted">{sb.id}</span>
@@ -261,6 +269,21 @@ export default function ReviewPanel() {
                     {sb.is_selected && <span className="badge">已选定</span>}
                   </div>
                   <p className="take-prompt">{sb.prompt}</p>
+                  <textarea
+                    placeholder="仅打回这个镜头：填写构图、角色、动作等修改方向"
+                    value={shotFeedback[sb.shot_id] ?? ''}
+                    onChange={(event) => setShotFeedback((current) => ({
+                      ...current, [sb.shot_id]: event.target.value,
+                    }))}
+                  />
+                  <button
+                    disabled={storyboardReview.isPending || !(shotFeedback[sb.shot_id] ?? '').trim()}
+                    onClick={() => storyboardReview.mutate({
+                      decision: 'REVISE',
+                      feedback: shotFeedback[sb.shot_id],
+                      shotIds: [sb.shot_id],
+                    })}
+                  >按意见仅重做本镜头</button>
                 </div>
               ))}
             </div>
@@ -275,13 +298,13 @@ export default function ReviewPanel() {
               <button
                 className="primary"
                 disabled={storyboardReview.isPending}
-                onClick={() => storyboardReview.mutate('APPROVE')}
+                onClick={() => storyboardReview.mutate({ decision: 'APPROVE' })}
               >
                 通过分镜并继续
               </button>
               <button
                 disabled={storyboardReview.isPending || !storyboardFeedback.trim()}
-                onClick={() => storyboardReview.mutate('REVISE')}
+                onClick={() => storyboardReview.mutate({ decision: 'REVISE' })}
               >
                 按意见修改分镜
               </button>

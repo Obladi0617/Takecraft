@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["storyboards"])
 
 class StoryboardGenerateIn(BaseModel):
     prompt: str | None = None
-    count: int = 2
+    count: int = 1
     width: int = 1024
     height: int = 576
 
@@ -41,7 +41,9 @@ async def generate_storyboards(
         payload={
             "shot_id": shot_id,
             "prompt": prompt,
-            "count": max(body.count, 1),
+            # Product rule: one inspectable reference image per shot.  Keeping
+            # this invariant server-side also covers older frontend clients.
+            "count": 1,
             "width": body.width,
             "height": body.height,
         },

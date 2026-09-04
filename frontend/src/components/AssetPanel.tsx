@@ -4,6 +4,8 @@ import {
   API_BASE,
   createCharacter,
   createLocation,
+  deleteCharacter,
+  deleteLocation,
   fetchAssets,
   fetchGenerationJobs,
   fetchScenes,
@@ -70,7 +72,9 @@ function ViewSlot({
   return (
     <div className={`asset-view ${reference ? '' : 'empty'}`}>
       {reference ? (
-        <img src={`${API_BASE}${reference.media_url}`} alt={VIEW_LABEL[view] ?? view} />
+        <a href={`${API_BASE}${reference.media_url}`} target="_blank" rel="noreferrer">
+          <img src={`${API_BASE}${reference.media_url}`} alt={VIEW_LABEL[view] ?? view} title="点击查看原图" />
+        </a>
       ) : (
         <div className="asset-view-placeholder">未生成</div>
       )}
@@ -394,6 +398,10 @@ export default function AssetPanel() {
     mutationFn: (body: CharacterBody) => createCharacter(projectId, body),
     onSuccess: invalidate,
   })
+  const removeCharacter = useMutation({
+    mutationFn: (id: string) => deleteCharacter(projectId, id),
+    onSuccess: invalidate,
+  })
 
   const genLocation = useMutation({
     mutationFn: (id: string) => generateLocationRefs(projectId, id),
@@ -420,6 +428,10 @@ export default function AssetPanel() {
     mutationFn: (body: LocationBody) => createLocation(projectId, body),
     onSuccess: invalidate,
   })
+  const removeLocation = useMutation({
+    mutationFn: (id: string) => deleteLocation(projectId, id),
+    onSuccess: invalidate,
+  })
 
   const relink = useMutation({
     mutationFn: () => relinkShots(projectId),
@@ -433,8 +445,8 @@ export default function AssetPanel() {
   const busy = assetJobsActive
   const actionError =
     tab === 'character'
-      ? [genCharacter, lockChar, uploadChar, patchChar, addCharacter]
-      : [genLocation, lockLoc, uploadLoc, patchLoc, addLocation]
+      ? [genCharacter, lockChar, uploadChar, patchChar, addCharacter, removeCharacter]
+      : [genLocation, lockLoc, uploadLoc, patchLoc, addLocation, removeLocation]
   const failed = actionError.find((m) => m.isError)
 
   const submitCreate = () => {
@@ -584,11 +596,16 @@ export default function AssetPanel() {
                   </button>
                   <button
                     className="ghost"
-                    disabled={locked}
+                    disabled={false}
                     onClick={() => setEditingId(editingId === c.id ? null : c.id)}
                   >
                     {editingId === c.id ? '收起设定' : '编辑设定'}
                   </button>
+                  <button
+                    className="danger"
+                    disabled={busy || removeCharacter.isPending}
+                    onClick={() => window.confirm(`删除角色“${c.name}”？已有图片文件会保留。`) && removeCharacter.mutate(c.id)}
+                  >删除角色</button>
                 </div>
                 {locked ? (
                   <p className="muted asset-hint">
@@ -603,7 +620,7 @@ export default function AssetPanel() {
                   )
                 )}
                 <PromptBlock block={c.prompt_block} hash={c.prompt_block_hash} />
-                {editingId === c.id && !locked && (
+                {editingId === c.id && (
                   <CharacterForm
                     key={`${c.id}-${c.version}`}
                     character={c}
@@ -660,11 +677,16 @@ export default function AssetPanel() {
                   </button>
                   <button
                     className="ghost"
-                    disabled={locked}
+                    disabled={false}
                     onClick={() => setEditingId(editingId === loc.id ? null : loc.id)}
                   >
                     {editingId === loc.id ? '收起设定' : '编辑设定'}
                   </button>
+                  <button
+                    className="danger"
+                    disabled={busy || removeLocation.isPending}
+                    onClick={() => window.confirm(`删除场景“${loc.name}”？已有图片文件会保留。`) && removeLocation.mutate(loc.id)}
+                  >删除场景</button>
                 </div>
                 {locked ? (
                   <p className="muted asset-hint">
@@ -678,7 +700,7 @@ export default function AssetPanel() {
                   )
                 )}
                 <PromptBlock block={loc.prompt_block} hash={loc.prompt_block_hash} />
-                {editingId === loc.id && !locked && (
+                {editingId === loc.id && (
                   <LocationForm
                     key={`${loc.id}-${loc.version}`}
                     location={loc}

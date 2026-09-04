@@ -28,7 +28,7 @@ export default function ShotWorkspace() {
   const [prompt, setPrompt] = useState('')
   const [uploading, setUploading] = useState(false)
   const [sbPrompt, setSbPrompt] = useState('')
-  const [sbCount, setSbCount] = useState(2)
+  const sbCount = 1
   const [forceAsk, setForceAsk] = useState(false)
   const [reviewFeedback, setReviewFeedback] = useState<Record<string, string>>({})
 
@@ -178,16 +178,7 @@ export default function ShotWorkspace() {
               value={sbPrompt}
               onChange={(e) => setSbPrompt(e.target.value)}
             />
-            <select
-              value={sbCount}
-              onChange={(e) => setSbCount(Number(e.target.value))}
-            >
-              {[2, 3, 4, 6].map((n) => (
-                <option key={n} value={n}>
-                  {n} 张
-                </option>
-              ))}
-            </select>
+            <span className="badge">每镜 1 张</span>
             <button
               className="primary"
               onClick={() => genStoryboard.mutate()}
@@ -211,7 +202,9 @@ export default function ShotWorkspace() {
               key={sb.id}
               className={`storyboard-card ${sb.is_selected ? 'selected' : ''}`}
             >
-              <img src={`${API_BASE}${sb.media_url}`} alt={sb.id} />
+              <a href={`${API_BASE}${sb.media_url}`} target="_blank" rel="noreferrer">
+                <img src={`${API_BASE}${sb.media_url}`} alt={sb.id} title="点击查看原图" />
+              </a>
               <div className="storyboard-meta">
                 <strong>{sb.id}</strong>
                 <span className="muted">seed {sb.seed ?? '-'}</span>
@@ -312,7 +305,7 @@ export default function ShotWorkspace() {
                 <span className="muted">{take.model}</span>
               </div>
               {take.prompt && <p className="take-prompt">{take.prompt}</p>}
-              {humanReview?.stage === 'HUMAN_TAKE_REVIEW' && (
+              {humanReview && (
                 <div className="take-human-review">
                   <textarea
                     placeholder="不合格时填写：哪里不好、希望怎样调整"

@@ -17,7 +17,9 @@ def auto_edit_timeline(project_id: str, session: Session) -> dict:
     clips = []
     for shot in shots:
         take = session.get(Take, shot.selected_take_id)  # type: ignore[arg-type]
-        duration = take.duration if take and take.duration else shot.duration_target
+        # 生成模型可能因帧对齐产出更长母片，成片严格服从剧本目标时长。
+        media_duration = take.duration if take and take.duration else shot.duration_target
+        duration = min(media_duration, shot.duration_target)
         clip = TimelineClip(
             id=f"clip_{index + 1:03d}",
             project_id=project_id,

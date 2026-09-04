@@ -30,7 +30,7 @@ export default function ProjectList() {
         name: trimmed.slice(0, 20) || '一句话短片',
         idea: trimmed,
         mode: 'AUTO',
-        default_take_count: 2,
+        default_take_count: 1,
       })
       await startOneSentence(project.id)
       return project

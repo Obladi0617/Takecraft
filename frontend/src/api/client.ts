@@ -222,6 +222,9 @@ export const patchCharacter = (
     body: JSON.stringify(body),
   })
 
+export const deleteCharacter = (pid: string, characterId: string) =>
+  api<void>(`/api/v1/projects/${pid}/characters/${characterId}`, { method: 'DELETE' })
+
 export const generateCharacterRefs = (pid: string, characterId: string) =>
   api<{ job: GenerationJob }>(
     `/api/v1/projects/${pid}/characters/${characterId}/references/generate`,
@@ -263,6 +266,9 @@ export const patchLocation = (
     method: 'PATCH',
     body: JSON.stringify(body),
   })
+
+export const deleteLocation = (pid: string, locationId: string) =>
+  api<void>(`/api/v1/projects/${pid}/locations/${locationId}`, { method: 'DELETE' })
 
 export const generateLocationRefs = (pid: string, locationId: string) =>
   api<{ job: GenerationJob }>(
@@ -322,10 +328,11 @@ export const submitStoryboardReview = (
   pid: string,
   decision: 'APPROVE' | 'REVISE',
   feedback = '',
+  targetShotIds: string[] = [],
 ) =>
   api<{ ok: boolean; review_id: string; decision: string }>(
     `/api/v1/projects/${pid}/storyboard-review`,
-    { method: 'POST', body: JSON.stringify({ decision, feedback }) },
+    { method: 'POST', body: JSON.stringify({ decision, feedback, target_shot_ids: targetShotIds }) },
   )
 
 export const submitTakeReview = (

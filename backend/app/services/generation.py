@@ -75,6 +75,7 @@ def enqueue_video_jobs(
     shot_id: str,
     count: int,
     prompt: str,
+    first_frame: str | None = None,
 ) -> list[GenerationJob]:
     jobs = []
     for _ in range(max(count, 1)):
@@ -85,7 +86,7 @@ def enqueue_video_jobs(
             shot_id=shot_id,
             index=index,
             job_type="VIDEO",
-            payload={"shot_id": shot_id, "prompt": prompt},
+            payload={"shot_id": shot_id, "prompt": prompt, "first_frame": first_frame},
         )
         session.add(job)
         jobs.append(job)

@@ -20,7 +20,7 @@ class Shot(SQLModel, table=True):
     location_id: str | None = None
     storyboard_id: str | None = None
     selected_take_id: str | None = None
-    take_count: int = Field(default=4)
+    take_count: int = Field(default=1)
     status: str = Field(default="PLANNED")
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)

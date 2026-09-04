@@ -277,8 +277,8 @@ class GenerationQueue:
         if shot is None:
             raise RuntimeError(f"Shot 不存在: {payload['shot_id']}")
         prompt = payload.get("prompt") or shot.description or shot.title
-        first_frame = None
-        if shot.storyboard_id:
+        first_frame = payload.get("first_frame")
+        if not first_frame and shot.storyboard_id:
             sb = session.get(Storyboard, shot.storyboard_id)
             if sb is not None:
                 first_frame = str(abs_path(job.project_id, sb.image_path))
@@ -348,7 +348,25 @@ class GenerationQueue:
         dest = abs_path(job.project_id, rel)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(staged, dest)
-        return {"take_id": take.id, "adapter_job_id": adapter_job_id}
+        # Persist a reusable continuity frame for the next shot and for later
+        # human-triggered retakes. Failure to extract must not discard a valid
+        # generated Take.
+        tail_rel = f"frames/{take.id}_tail.png"
+        try:
+            from ..media.ffmpeg import extract_tail_frame
+
+            tail = await asyncio.to_thread(
+                extract_tail_frame,
+                dest,
+                abs_path(job.project_id, tail_rel),
+            )
+        except Exception:  # noqa: BLE001 - continuity frame is best-effort
+            tail = None
+        return {
+            "take_id": take.id,
+            "adapter_job_id": adapter_job_id,
+            "tail_frame": tail_rel if tail else None,
+        }
 
     async def _do_review(self, session: Session, job: GenerationJob) -> dict:
         """AI Dailies：真实看片审核一条 Take。
@@ -378,11 +396,6 @@ class GenerationQueue:
 
         # ffprobe/ffmpeg 是子进程调用，必须丢到线程里，否则整条队列会被堵住
         expected_duration = max(shot.duration_target, 1.0)
-        # MiniMax H3 currently generates at least five seconds. Its 17-frame
-        # latent alignment yields about 5.17s at 24 fps, within the normal
-        # tolerance when reviewed against the actual five-second request.
-        if settings.video_backend == "comfyui":
-            expected_duration = max(expected_duration, 5.0)
         stats, failures, frames = await asyncio.to_thread(
             measure_and_sample, job.project_id, take, expected_duration
         )

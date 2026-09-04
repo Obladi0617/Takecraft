@@ -66,7 +66,8 @@ from ..services.generation import (
 from ..services.review import rank_takes
 from ..services.timeline import auto_edit_timeline
 
-STORYBOARD_CANDIDATES = 2
+# 人工审核的是镜头内容而不是同一提示词的随机抽卡；默认每镜仅生成一张。
+STORYBOARD_CANDIDATES = 1
 
 
 class ProductionState(TypedDict, total=False):
@@ -266,7 +267,7 @@ async def asset_design(state: ProductionState) -> dict:
         record_artifact(session, project_id, "director_bible", "director", bible)
         plan = await producer_plan(model, idea, screenplay)
         record_artifact(session, project_id, "production_plan", "producer", plan)
-        take_count = max(1, min(4, int(plan.get("default_take_count") or 2)))
+        take_count = 1
         if settings.video_backend == "comfyui":
             take_count = 1
         for shot in _shots_of_project(session, project_id):
@@ -365,22 +366,8 @@ async def asset_review(state: ProductionState) -> dict:
                     if location.status != "LOCKED":
                         lock_location(session, location)
                 link_shots_to_assets(session, project_id)
-                job_ids = [
-                    enqueue_character_turnaround(
-                        session, project_id, character, character_design_prompt(character)
-                    ).id
-                    for character in characters
-                ]
-                job_ids += [
-                    enqueue_location_refs(
-                        session, project_id, location, location_design_prompt(location)
-                    ).id
-                    for location in locations
-                ]
                 character_names = [character.name for character in characters]
                 location_names = [location.name for location in locations]
-            statuses = await wait_for_jobs(project_id, job_ids) if job_ids else {}
-            asset_failed = [jid for jid, s in statuses.items() if s != "DONE"]
             with _session(project_id) as session:
                 for character in session.exec(
                     select(Character).where(Character.project_id == project_id)
@@ -401,12 +388,10 @@ async def asset_review(state: ProductionState) -> dict:
                     {
                         "characters": character_names,
                         "locations": location_names,
-                        "failed_asset_jobs": asset_failed,
+                        "failed_asset_jobs": [],
                     },
                 )
-            note = "人工审核已通过资产"
-            if asset_failed:
-                note += f"，{len(asset_failed)} 个资产出图失败（仍以文本锚点约束一致性）"
+            note = "人工审核已通过全部现有资产，不重复生成参考图"
             return _stage_update(project_id, "STORYBOARDING", note)
         feedback = str(decision.get("feedback") or "").strip()
         if not feedback:
@@ -572,6 +557,7 @@ async def storyboard_review(state: ProductionState) -> dict:
                     select_and_lock_storyboard(session, project_id, shot, sb_id)
             return _stage_update(project_id, "VIDEO_GENERATION", "人工审核已通过分镜")
         feedback = str(decision.get("feedback") or "").strip()
+        target_shot_ids = set(decision.get("target_shot_ids") or [])
         if not feedback:
             await asyncio.sleep(1.0)
             continue
@@ -580,6 +566,8 @@ async def storyboard_review(state: ProductionState) -> dict:
             shots = _shots_of_project(session, project_id)
             job_ids = []
             for shot in shots:
+                if target_shot_ids and shot.id not in target_shot_ids:
+                    continue
                 scene = session.get(Scene, shot.scene_id) if shot.scene_id else None
                 assets = shot_asset_blocks(session, project_id, shot)
                 old_sb = list(
@@ -636,25 +624,48 @@ async def video_generation(state: ProductionState) -> dict:
     project_id = state["project_id"]
     targets = state.get("needs_retake_shot_ids") or state.get("shot_ids") or []
     job_ids: list[str] = []
+    # 场景内顺序生成，使后一镜可以使用前一镜的尾帧作为首帧。
+    previous_tail_by_scene: dict[str, str] = {}
     with _session(project_id) as session:
-        for shot_id in targets:
+        ordered = [s for s in _shots_of_project(session, project_id) if s.id in targets]
+    for shot in ordered:
+        shot_id = shot.id
+        with _session(project_id) as session:
             shot = session.get(Shot, shot_id)
             if shot is None:
                 continue
             sb = session.get(Storyboard, shot.storyboard_id) if shot.storyboard_id else None
             prompt = (sb.prompt if sb else "") or shot.description
             jobs = enqueue_video_jobs(
-                session, project_id, shot.id, shot.take_count, prompt
+                session, project_id, shot.id, 1, prompt,
+                first_frame=previous_tail_by_scene.get(shot.scene_id or ""),
             )
             shot.status = "GENERATING"
             session.add(shot)
             session.commit()
             job_ids.extend(job.id for job in jobs)
+        shot_statuses = await wait_for_jobs(project_id, [job.id for job in jobs])
+        if any(status != "DONE" for status in shot_statuses.values()):
+            raise RuntimeError(f"镜头 {shot_id} 视频生成失败: {shot_statuses}")
+        with _session(project_id) as session:
+            generated = takes_of_shot(session, project_id, shot_id)
+            if generated:
+                from ..media.ffmpeg import extract_tail_frame
+                from ..db import abs_path
+                take = generated[-1]
+                tail_rel = f"frames/{take.id}_tail.png"
+                tail = await asyncio.to_thread(
+                    extract_tail_frame,
+                    abs_path(project_id, take.original_path),
+                    abs_path(project_id, tail_rel),
+                )
+                if tail:
+                    previous_tail_by_scene[shot.scene_id or ""] = str(tail)
 
-    statuses = await wait_for_jobs(project_id, job_ids)
+    statuses = {job_id: "DONE" for job_id in job_ids}
     done = sum(1 for s in statuses.values() if s == "DONE")
-    if done == 0 and job_ids:
-        raise RuntimeError(f"视频生成全部失败: {statuses}")
+    if done != len(job_ids):
+        raise RuntimeError(f"视频未全部生成成功: {statuses}")
 
     with _session(project_id) as session:
         for shot_id in targets:
@@ -672,14 +683,14 @@ async def video_generation(state: ProductionState) -> dict:
 
 
 async def reviewing(state: ProductionState) -> dict:
-    """Reviewer 真实看片：审核入队 → 等待 → 同镜头 KEEP 打擂台 → 决定重拍。
+    """Reviewer 真实看片并给出参考意见，但不再自动决定重拍。
 
     审核不在图节点里直接调模型：视觉模型调用需要限并发、可重试、在前端可见，
-    这三件事统一队列已经有了（规格书第 23 节）。
+    这三件事统一队列已经有了。最终通过或重拍完全交给人工复审，避免模型
+    误判引发整批重复生成和额度浪费。
     """
     project_id = state["project_id"]
     rounds = dict(state.get("retake_rounds", {}))
-    needs_retake: list[str] = []
     blocked_notes: list[str] = []
 
     with _session(project_id) as session:
@@ -744,36 +755,16 @@ async def reviewing(state: ProductionState) -> dict:
     if compare_ids:
         await wait_for_jobs(project_id, compare_ids)
 
-    with _session(project_id) as session:
-        reviews = _take_reviews(session, project_id)
-        for shot in _shots_of_project(session, project_id):
-            takes = takes_of_shot(session, project_id, shot.id)
-            if not takes:
-                needs_retake.append(shot.id)
-                continue
-            if any(reviews.get(t.id, {}).get("decision") == "KEEP" for t in takes):
-                continue
-            used = rounds.get(shot.id, 0)
-            if used < settings.max_auto_retake_rounds:
-                rounds[shot.id] = used + 1
-                needs_retake.append(shot.id)
-            else:
-                blocked_notes.append(
-                    f"镜头「{shot.title}」重拍 {used} 轮仍无 KEEP，按最高分兜底选片"
-                )
-
     summary = f"{len(job_ids)} 条送审 / {len(compare_ids)} 组比较"
     update = _stage_update(
         project_id,
-        "TAKE_SELECTION",
-        f"审核完成（{summary}），{len(needs_retake)} 个镜头待重拍"
-        if needs_retake
-        else f"全部镜头通过审核（{summary}）",
+        "HUMAN_TAKE_REVIEW",
+        f"机器审核完成（{summary}），等待人工逐条通过或打回",
     )
     return {
         **update,
         "retake_rounds": rounds,
-        "needs_retake_shot_ids": needs_retake,
+        "needs_retake_shot_ids": [],
         "blocked_reason": "；".join(blocked_notes) if blocked_notes else "",
     }
 
@@ -794,13 +785,14 @@ async def human_take_review(state: ProductionState) -> dict:
             )
             for shot in _shots_of_project(session, project_id):
                 takes = takes_of_shot(session, project_id, shot.id)
-                approved = next(
-                    (
-                        take
-                        for take in reversed(takes)
-                        if decisions.get(take.id, {}).get("decision") == "APPROVE"
-                    ),
-                    None,
+                # Only the newest Take can release a shot.  An older approved
+                # Take must not win while its replacement is still generating.
+                latest = takes[-1] if takes else None
+                approved = (
+                    latest
+                    if latest
+                    and decisions.get(latest.id, {}).get("decision") == "APPROVE"
+                    else None
                 )
                 if approved is None:
                     all_approved = False
@@ -851,7 +843,14 @@ async def take_selection(state: ProductionState) -> dict:
                 auto_keep = 1 if review.get("decision") == "KEEP" else 0
                 return (human_keep + auto_keep, _mean_score(review))
 
-            best = max(takes, key=rank)
+            human_approved = [
+                take
+                for take in takes
+                if human_decisions.get(take.id, {}).get("decision") == "APPROVE"
+            ]
+            # Human approval is authoritative; when a shot has been retaken,
+            # the most recently approved result supersedes older approvals.
+            best = human_approved[-1] if human_approved else max(takes, key=rank)
             shot.selected_take_id = best.id
             shot.status = "SELECTED"
             session.add(shot)
