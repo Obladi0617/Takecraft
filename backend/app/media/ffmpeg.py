@@ -80,6 +80,28 @@ def make_proxy(src: Path, dst: Path, height: int | None = None) -> Path | None:
     return dst
 
 
+def trim_to_duration(src: Path, dst: Path, duration: float) -> Path | None:
+    """Re-encode a generated clip to the exact screenplay duration.
+
+    Video models emit only legal frame counts, so a 1.5-second request may be
+    returned as 1.625 seconds. Re-encoding before Take/proxy creation keeps the
+    source, UI duration and final timeline consistent.
+    """
+    if not FFMPEG or not src.is_file() or duration <= 0:
+        return None
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            FFMPEG, "-y", "-i", str(src), "-t", f"{duration:.3f}",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-c:a", "aac", "-movflags", "+faststart", str(dst),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return dst if result.returncode == 0 and dst.is_file() else None
+
+
 def extract_tail_frame(src: Path, dst: Path, offset: float = 0.12) -> Path | None:
     """提取片尾前的清晰帧，供同场景下一镜作为首帧。"""
     if not FFMPEG or not src.is_file():

@@ -28,7 +28,7 @@ from ..agents.film_agents import (
 )
 from ..compliance import compliance_gate
 from ..config import settings
-from ..db import get_engine, write_project_json
+from ..db import abs_path, get_engine, write_project_json
 from ..domain import (
     AgentArtifact,
     Character,
@@ -297,10 +297,29 @@ async def asset_design(state: ProductionState) -> dict:
         )
         character_ids = [c.id for c in characters]
         location_ids = [loc.id for loc in locations]
+        asset_job_ids = [
+            enqueue_character_turnaround(
+                session, project_id, character, character_design_prompt(character)
+            ).id
+            for character in characters
+        ]
+        asset_job_ids += [
+            enqueue_location_refs(
+                session, project_id, location, location_design_prompt(location)
+            ).id
+            for location in locations
+        ]
+
+    # Human asset review must inspect actual images, not just text cards.  Wait
+    # here so the review stage cannot be entered with empty image slots.
+    asset_statuses = await wait_for_jobs(project_id, asset_job_ids) if asset_job_ids else {}
+    failed_assets = [job_id for job_id, status in asset_statuses.items() if status != "DONE"]
+    if failed_assets:
+        raise RuntimeError(f"资产参考图生成失败: {failed_assets}")
 
     note = (
         f"导演圣经与生产计划就绪（每镜 {take_count} Take）；"
-        f"角色 {len(characters)} 个 / 场景 {len(locations)} 个，等待人工审核"
+        f"角色 {len(characters)} 个 / 场景 {len(locations)} 个，参考图已生成，等待人工审核"
     )
     return {
         **_stage_update(project_id, "ASSET_REVIEW", note),
@@ -630,15 +649,36 @@ async def video_generation(state: ProductionState) -> dict:
         ordered = [s for s in _shots_of_project(session, project_id) if s.id in targets]
     for shot in ordered:
         shot_id = shot.id
+        scene_key = ""
         with _session(project_id) as session:
             shot = session.get(Shot, shot_id)
             if shot is None:
                 continue
+            scene_key = shot.scene_id or ""
+            if scene_key not in previous_tail_by_scene:
+                scene_shots = [
+                    item
+                    for item in _shots_of_project(session, project_id)
+                    if (item.scene_id or "") == scene_key and item.index < shot.index
+                ]
+                for previous_shot in reversed(scene_shots):
+                    previous_takes = takes_of_shot(
+                        session, project_id, previous_shot.id
+                    )
+                    if not previous_takes:
+                        continue
+                    previous_take = previous_takes[-1]
+                    candidate = abs_path(
+                        project_id, f"frames/{previous_take.id}_tail.png"
+                    )
+                    if candidate.exists():
+                        previous_tail_by_scene[scene_key] = str(candidate)
+                        break
             sb = session.get(Storyboard, shot.storyboard_id) if shot.storyboard_id else None
             prompt = (sb.prompt if sb else "") or shot.description
             jobs = enqueue_video_jobs(
                 session, project_id, shot.id, 1, prompt,
-                first_frame=previous_tail_by_scene.get(shot.scene_id or ""),
+                first_frame=previous_tail_by_scene.get(scene_key),
             )
             shot.status = "GENERATING"
             session.add(shot)
@@ -651,7 +691,6 @@ async def video_generation(state: ProductionState) -> dict:
             generated = takes_of_shot(session, project_id, shot_id)
             if generated:
                 from ..media.ffmpeg import extract_tail_frame
-                from ..db import abs_path
                 take = generated[-1]
                 tail_rel = f"frames/{take.id}_tail.png"
                 tail = await asyncio.to_thread(
@@ -660,7 +699,7 @@ async def video_generation(state: ProductionState) -> dict:
                     abs_path(project_id, tail_rel),
                 )
                 if tail:
-                    previous_tail_by_scene[shot.scene_id or ""] = str(tail)
+                    previous_tail_by_scene[scene_key] = str(tail)
 
     statuses = {job_id: "DONE" for job_id in job_ids}
     done = sum(1 for s in statuses.values() if s == "DONE")
@@ -993,7 +1032,9 @@ def build_resume_graph():
     graph.add_node("editing", editing)
     graph.add_node("rendering", rendering)
     graph.add_node("complete", complete)
-    graph.add_edge(START, "reviewing")
+    # Resume first fills only shots that still have no Take, then reviews all
+    # available media.  Existing Takes are preserved and never regenerated.
+    graph.add_edge(START, "video_generation")
     graph.add_edge("reviewing", "human_take_review")
     graph.add_edge("human_take_review", "take_selection")
 
@@ -1011,7 +1052,11 @@ async def resume_film_pipeline(project_id: str) -> dict:
         project = session.get(Project, project_id)
         if project is None:
             raise RuntimeError("project not found")
-        shot_ids = [shot.id for shot in _shots_of_project(session, project_id)]
+        shot_ids = [
+            shot.id
+            for shot in _shots_of_project(session, project_id)
+            if not takes_of_shot(session, project_id, shot.id)
+        ]
     initial: ProductionState = {
         "project_id": project_id,
         "idea": project.idea or project.name,
