@@ -48,7 +48,11 @@ REF_VIEW_PRIORITY = {"FRONT": 0, "ANCHOR": 0, "ESTABLISHING": 1}
 
 
 def asset_media_url(project_id: str, asset: Asset) -> str:
-    return f"/media/{project_id}/{asset.path}"
+    # Generated references overwrite a deterministic path. Include the actual
+    # file revision so browsers do not keep showing the previous image.
+    path = abs_path(project_id, asset.path)
+    revision = path.stat().st_mtime_ns if path.exists() else 0
+    return f"/media/{project_id}/{asset.path}?v={revision}"
 
 
 def refs_of(session: Session, project_id: str, owner_id: str) -> list[Asset]:
