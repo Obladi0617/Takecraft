@@ -14,7 +14,7 @@ SCREENPLAY_SYSTEM = """你是资深短片编剧。根据一句话创意输出剧
 "shots": [{"title": "...", "description": "...", "framing": "WIDE|MEDIUM|CLOSE_UP|EXTREME_WIDE",
 "camera_motion": "STATIC|SLOW_PUSH_IN|PAN_LEFT|TILT_UP|HANDHELD", "duration": 3.0}]}]}
 要求：场景数和每场镜头数由叙事需要决定，不设固定镜头数量；每个镜头必须独立给出合理的
-duration，建议 5~12 秒，并让总时长和节奏符合故事；中文。只输出 JSON。"""
+duration，建议 2~4 秒，并让总时长和节奏符合故事；中文。只输出 JSON。"""
 
 REVISE_SCREENPLAY_SYSTEM = """你是资深短片编剧。根据人工审核意见修改现有剧本 JSON。
 保持未被意见点名的内容稳定；可调整场景、镜头数量和每镜 duration。输出结构必须与原剧本一致，

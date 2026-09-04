@@ -239,7 +239,7 @@ async def scripting(state: ProductionState) -> dict:
                         index=s_index,
                         title=str(sh.get("title", f"镜头{s_index}")),
                         description=str(sh.get("description", "")),
-                        duration_target=float(sh.get("duration") or 3.0),
+                        duration_target=float(sh.get("duration") or 2.0),
                         framing=str(sh.get("framing", "MEDIUM")),
                         camera_motion=str(sh.get("camera_motion", "STATIC")),
                         status="PLANNED",
