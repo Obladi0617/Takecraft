@@ -417,8 +417,7 @@ async def asset_review(state: ProductionState) -> dict:
             await asyncio.sleep(1.0)
             continue
         with _session(project_id) as session:
-            screenplay_artifact = _latest_artifact(session, project_id, "screenplay")
-            screenplay = screenplay_artifact.data if screenplay_artifact else {}
+            screenplay = _latest_artifact(session, project_id, "screenplay")
             for char in session.exec(
                 select(Character).where(Character.project_id == project_id)
             ):
@@ -1022,9 +1021,12 @@ async def run_film_pipeline(project_id: str) -> dict:
     final = await build_film_graph().ainvoke(initial)
     return dict(final)
 
-def build_resume_graph():
+def build_resume_graph(start_node: str = "reviewing"):
     """Resume an interrupted production from review, preserving all existing media."""
     graph = StateGraph(ProductionState)
+    graph.add_node("asset_review", asset_review)
+    graph.add_node("storyboarding", storyboarding)
+    graph.add_node("storyboard_review", storyboard_review)
     graph.add_node("reviewing", reviewing)
     graph.add_node("video_generation", video_generation)
     graph.add_node("human_take_review", human_take_review)
@@ -1032,9 +1034,10 @@ def build_resume_graph():
     graph.add_node("editing", editing)
     graph.add_node("rendering", rendering)
     graph.add_node("complete", complete)
-    # Resume first fills only shots that still have no Take, then reviews all
-    # available media.  Existing Takes are preserved and never regenerated.
-    graph.add_edge(START, "video_generation")
+    graph.add_edge(START, start_node)
+    graph.add_edge("asset_review", "storyboarding")
+    graph.add_edge("storyboarding", "storyboard_review")
+    graph.add_edge("storyboard_review", "video_generation")
     graph.add_edge("reviewing", "human_take_review")
     graph.add_edge("human_take_review", "take_selection")
 
@@ -1065,5 +1068,10 @@ async def resume_film_pipeline(project_id: str) -> dict:
         "retake_rounds": {},
         "needs_retake_shot_ids": [],
     }
-    final = await build_resume_graph().ainvoke(initial)
+    start_node = {
+        "ASSET_REVIEW": "asset_review",
+        "STORYBOARDING": "storyboarding",
+        "STORYBOARD_REVIEW": "storyboard_review",
+    }.get(project.status, "video_generation")
+    final = await build_resume_graph(start_node).ainvoke(initial)
     return dict(final)
