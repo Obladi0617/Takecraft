@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { API_BASE, fetchPipeline } from '../api/client'
 import { useAppStore } from '../stores/app'
@@ -24,6 +24,7 @@ const RETAKE_STAGES = new Set(['VIDEO_GENERATION', 'REVIEWING'])
 export default function PipelinePanel() {
   const projectId = useAppStore((s) => s.projectId)!
   const queryClient = useQueryClient()
+  const [showRender, setShowRender] = useState(false)
 
   const { data } = useQuery({
     queryKey: ['pipeline', projectId],
@@ -45,6 +46,15 @@ export default function PipelinePanel() {
     }
     prevStatus.current = status
   }, [status, queryClient])
+
+  useEffect(() => {
+    if (!showRender) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setShowRender(false)
+    }
+    window.addEventListener('keydown', closeOnEscape)
+    return () => window.removeEventListener('keydown', closeOnEscape)
+  }, [showRender])
 
   if (!job) return null
 
@@ -111,14 +121,25 @@ export default function PipelinePanel() {
       )}
 
       {renderUrl && (
-        <a
+        <button
           className="pipeline-render"
-          href={`${API_BASE}${renderUrl}`}
-          target="_blank"
-          rel="noreferrer"
+          onClick={() => setShowRender(true)}
         >
-          查看成片 →
-        </a>
+          在当前页面查看成片
+        </button>
+      )}
+
+      {renderUrl && showRender && (
+        <div className="render-modal" role="dialog" aria-modal="true" aria-label="最终成片" onClick={() => setShowRender(false)}>
+          <div className="render-modal-content" onClick={(event) => event.stopPropagation()}>
+            <div className="render-modal-head">
+              <strong>最终成片</strong>
+              <button onClick={() => setShowRender(false)} aria-label="关闭成片">×</button>
+            </div>
+            <video src={`${API_BASE}${renderUrl}`} controls autoPlay playsInline />
+            <a href={`${API_BASE}${renderUrl}`} download>下载成片</a>
+          </div>
+        </div>
       )}
 
       {blockedReason && (
