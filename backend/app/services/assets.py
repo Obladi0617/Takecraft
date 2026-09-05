@@ -30,7 +30,7 @@ VIEW_LABELS = {
     "ESTABLISHING": "场景主角度全景，广角建立镜头，展示完整空间布局",
     "KEY_ANGLE_A": "场景角度 A，从主角度横向改变约四十五度，展示明显不同的空间透视",
     "KEY_ANGLE_B": "场景反向角度，展示与主角度明显不同的空间关系",
-    "DETAIL": "场景细节特写，仅聚焦关键材质、道具和纹理，禁止重复全景构图",
+    "DETAIL": "场景细节特写，放大画面中最重要的视觉锚点与关键元素（如招牌、道具、纹理），仅聚焦一处核心细节，禁止重复全景构图",
 }
 
 
@@ -92,6 +92,8 @@ def location_design_prompt(location: Location) -> str:
         parts.append("材质 " + "、".join(location.materials))
     if location.immutable_elements:
         parts.append("固定元素 " + "、".join(location.immutable_elements))
+    if location.visual_cues:
+        parts.append("关键视觉锚点 " + "、".join(location.visual_cues))
     if location.lighting_rules:
         parts.append("光线 " + "、".join(location.lighting_rules))
     parts.append("无人空镜，电影感构图")

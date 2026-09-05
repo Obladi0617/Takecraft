@@ -36,7 +36,6 @@ const VIEW_LABEL: Record<string, string> = {
   SIDE: '侧面',
   BACK: '背面',
   ESTABLISHING: '主角度',
-  KEY_ANGLE_A: '角度 A',
   DETAIL: '细节',
 }
 

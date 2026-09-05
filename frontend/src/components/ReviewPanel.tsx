@@ -12,10 +12,9 @@ import {
 } from '../api/client'
 import { useAppStore } from '../stores/app'
 
-const LOCATION_REVIEW_VIEWS = new Set(['ESTABLISHING', 'KEY_ANGLE_A', 'DETAIL'])
+const LOCATION_REVIEW_VIEWS = new Set(['ESTABLISHING', 'DETAIL'])
 const LOCATION_VIEW_LABEL: Record<string, string> = {
   ESTABLISHING: '主角度',
-  KEY_ANGLE_A: '角度 A',
   DETAIL: '细节',
 }
 

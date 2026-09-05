@@ -7,8 +7,8 @@ from .base import utcnow
 
 LOCATION_SOURCES = ["AUTO", "IMPORT"]
 LOCATION_STATUSES = ["DRAFT", "PENDING_CONFIRM", "LOCKED"]
-# 场景参考素材：主角度、角度 A、细节三张
-LOCATION_REF_KINDS = ["ESTABLISHING", "KEY_ANGLE_A", "DETAIL"]
+# 场景参考素材：主角度、细节两张
+LOCATION_REF_KINDS = ["ESTABLISHING", "DETAIL"]
 
 
 class Location(SQLModel, table=True):

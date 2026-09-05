@@ -689,6 +689,12 @@ async def video_generation(state: ProductionState) -> dict:
     project_id = state["project_id"]
     targets = state.get("needs_retake_shot_ids") or state.get("shot_ids") or []
     job_ids: list[str] = []
+    completed_count = 0
+    _stage_update(
+        project_id,
+        "HUMAN_TAKE_REVIEW",
+        f"视频逐镜生成中（0/{len(targets)}）；每完成一条即可立即播放复审",
+    )
     # 场景内顺序生成，使后一镜可以使用前一镜的尾帧作为首帧。
     previous_tail_by_scene: dict[str, str] = {}
     with _session(project_id) as session:
@@ -746,6 +752,12 @@ async def video_generation(state: ProductionState) -> dict:
                 )
                 if tail:
                     previous_tail_by_scene[scene_key] = str(tail)
+        completed_count += 1
+        _stage_update(
+            project_id,
+            "HUMAN_TAKE_REVIEW",
+            f"视频逐镜生成中（{completed_count}/{len(targets)}）；已完成的 Take 可立即播放复审",
+        )
 
     statuses = {job_id: "DONE" for job_id in job_ids}
     done = sum(1 for s in statuses.values() if s == "DONE")
@@ -761,7 +773,7 @@ async def video_generation(state: ProductionState) -> dict:
         session.commit()
     return {
         **_stage_update(
-            project_id, "REVIEWING", f"本轮 {done}/{len(job_ids)} 个 Take 生成完成"
+            project_id, "HUMAN_TAKE_REVIEW", f"本轮 {done}/{len(job_ids)} 个 Take 生成完成，等待人工复审"
         ),
         "needs_retake_shot_ids": [],
     }
