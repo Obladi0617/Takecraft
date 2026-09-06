@@ -1046,6 +1046,11 @@ textarea:focus {
   border-color: var(--ok);
 }
 
+.take-review-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
 .take-review-card video {
   width: 100%;
   max-height: 300px;
@@ -1058,6 +1063,54 @@ textarea:focus {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.take-reject-check {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.review-command-notice {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 12%, var(--panel));
+  border: 1px solid var(--ok);
+  border-radius: 8px;
+}
+
+.review-command-notice button {
+  padding: 2px 8px;
+}
+
+.take-review-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px;
+  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  backdrop-filter: blur(10px);
+}
+
+.take-review-footer .muted {
+  margin-right: auto;
 }
 
 .take-review-card details {

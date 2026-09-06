@@ -6,8 +6,10 @@ Asset 行 id 采用 `{owner_id}_{view}` 确定性主键，重新生成即覆盖�
 
 import hashlib
 import shutil
+from collections import defaultdict
 from pathlib import Path
 
+from PIL import Image, ImageOps
 from sqlmodel import Session, select
 
 from ..db import abs_path, project_path
@@ -64,6 +66,46 @@ def refs_of(session: Session, project_id: str, owner_id: str) -> list[Asset]:
         )
     )
     return [a for a in rows if a.meta.get("owner_id") == owner_id]
+
+
+def character_reference_sheets(session: Session, project_id: str) -> list[str]:
+    """把每个角色的全部视图合成一张参考板，供 FLUX.2 多图参考。
+
+    FLUX.2 单次最多接收 10 张参考图；按角色合板既能把正/侧/背全部传入，
+    又不会因为角色较多而截断后面的参考图。
+    """
+    rows = session.exec(
+        select(Asset).where(
+            Asset.project_id == project_id,
+            Asset.type == CHARACTER_ASSET_TYPE,
+        )
+    ).all()
+    grouped: dict[str, list[Asset]] = defaultdict(list)
+    for asset in rows:
+        owner_id = str(asset.meta.get("owner_id") or "")
+        if owner_id and abs_path(project_id, asset.path).is_file():
+            grouped[owner_id].append(asset)
+
+    output_dir = project_path(project_id) / "assets" / "conditioning"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    priority = {"FRONT": 0, "SIDE": 1, "BACK": 2}
+    sheets: list[str] = []
+    for owner_id in sorted(grouped):
+        assets = sorted(grouped[owner_id], key=lambda a: priority.get(str(a.meta.get("view")), 9))
+        panels: list[Image.Image] = []
+        for asset in assets:
+            with Image.open(abs_path(project_id, asset.path)) as source:
+                panel = ImageOps.contain(source.convert("RGB"), (512, 680))
+                panels.append(ImageOps.pad(panel, (512, 680), color=(238, 238, 238)))
+        if not panels:
+            continue
+        sheet = Image.new("RGB", (512 * len(panels), 680), (238, 238, 238))
+        for index, panel in enumerate(panels):
+            sheet.paste(panel, (512 * index, 0))
+        destination = output_dir / f"{owner_id}_all_views.jpg"
+        sheet.save(destination, format="JPEG", quality=94)
+        sheets.append(str(destination.resolve()))
+    return sheets
 
 
 def character_design_prompt(character: Character) -> str:
@@ -177,6 +219,7 @@ def enqueue_asset_job(
     views: list[str],
     width: int = 1024,
     height: int = 576,
+    references: list[str] | None = None,
 ) -> GenerationJob:
     index, job_id = next_seq_and_id(session, GenerationJob, project_id, "job")
     job = GenerationJob(
@@ -191,6 +234,7 @@ def enqueue_asset_job(
             "views": views,
             "width": width,
             "height": height,
+            "references": list(references or []),
         },
     )
     session.add(job)
@@ -225,6 +269,7 @@ def enqueue_location_refs(
         "LOCATION",
         prompt,
         list(LOCATION_REF_KINDS),
+        references=character_reference_sheets(session, project_id),
     )
 
 

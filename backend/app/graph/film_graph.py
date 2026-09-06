@@ -33,6 +33,7 @@ from ..domain import (
     AgentArtifact,
     Asset,
     Character,
+    GenerationJob,
     Location,
     Project,
     Scene,
@@ -42,6 +43,7 @@ from ..domain import (
     TimelineClip,
 )
 from ..media.render import render_timeline
+from ..jobs import generation_queue
 from ..repositories import next_seq_and_id
 from ..services.assets import (
     character_design_prompt,
@@ -49,6 +51,7 @@ from ..services.assets import (
     enqueue_asset_job,
     enqueue_character_turnaround,
     enqueue_location_refs,
+    character_reference_sheets,
     link_shots_to_assets,
     location_design_prompt,
     lock_character,
@@ -299,13 +302,17 @@ async def asset_design(state: ProductionState) -> dict:
         )
         character_ids = [c.id for c in characters]
         location_ids = [loc.id for loc in locations]
-        asset_job_ids = [
+        character_job_ids = [
             enqueue_character_turnaround(
                 session, project_id, character, character_design_prompt(character)
             ).id
             for character in characters
         ]
-        asset_job_ids += [
+        character_statuses = await wait_for_jobs(project_id, character_job_ids) if character_job_ids else {}
+        failed_characters = [job_id for job_id, status in character_statuses.items() if status != "DONE"]
+        if failed_characters:
+            raise RuntimeError(f"角色参考图生成失败: {failed_characters}")
+        asset_job_ids = [
             enqueue_location_refs(
                 session, project_id, location, location_design_prompt(location)
             ).id
@@ -442,6 +449,7 @@ async def asset_review(state: ProductionState) -> dict:
                         prompt = f"{location_design_prompt(location)}。人工返修意见：{feedback}"
                         job_ids.append(enqueue_asset_job(
                             session, project_id, owner_id, "LOCATION", prompt, [view],
+                            references=character_reference_sheets(session, project_id),
                         ).id)
                 if not job_ids:
                     raise RuntimeError("所选资产图片已不存在，无法打回")
@@ -483,13 +491,19 @@ async def asset_review(state: ProductionState) -> dict:
             characters, locations = create_assets_from_cards(
                 session, project_id, new_chars, new_locs
             )
-            job_ids = [
+            character_job_ids = [
                 enqueue_character_turnaround(
                     session, project_id, c, character_design_prompt(c)
                 ).id
                 for c in characters
             ]
-            job_ids += [
+        character_statuses = await wait_for_jobs(project_id, character_job_ids) if character_job_ids else {}
+        failed_characters = [job_id for job_id, status in character_statuses.items() if status != "DONE"]
+        if failed_characters:
+            raise RuntimeError(f"角色参考图重新生成失败: {failed_characters}")
+        with _session(project_id) as session:
+            locations = list(session.exec(select(Location).where(Location.project_id == project_id)))
+            job_ids = [
                 enqueue_location_refs(
                     session, project_id, loc, location_design_prompt(loc)
                 ).id
@@ -695,42 +709,32 @@ async def video_generation(state: ProductionState) -> dict:
         "HUMAN_TAKE_REVIEW",
         f"视频逐镜生成中（0/{len(targets)}）；每完成一条即可立即播放复审",
     )
-    # 场景内顺序生成，使后一镜可以使用前一镜的尾帧作为首帧。
-    previous_tail_by_scene: dict[str, str] = {}
+    # 全片顺序生成：每一个 Take 都使用上一个 Take 的尾帧作为首帧，
+    # 场景切换也不断链。
     with _session(project_id) as session:
         ordered = [s for s in _shots_of_project(session, project_id) if s.id in targets]
     for shot in ordered:
         shot_id = shot.id
-        scene_key = ""
         with _session(project_id) as session:
             shot = session.get(Shot, shot_id)
             if shot is None:
                 continue
-            scene_key = shot.scene_id or ""
-            if scene_key not in previous_tail_by_scene:
-                scene_shots = [
-                    item
-                    for item in _shots_of_project(session, project_id)
-                    if (item.scene_id or "") == scene_key and item.index < shot.index
-                ]
-                for previous_shot in reversed(scene_shots):
-                    previous_takes = takes_of_shot(
-                        session, project_id, previous_shot.id
-                    )
-                    if not previous_takes:
-                        continue
+            first_frame: str | None = None
+            project_shots = _shots_of_project(session, project_id)
+            position = next((i for i, item in enumerate(project_shots) if item.id == shot.id), -1)
+            if position > 0:
+                previous_shot = project_shots[position - 1]
+                previous_takes = takes_of_shot(session, project_id, previous_shot.id)
+                if previous_takes:
                     previous_take = previous_takes[-1]
-                    candidate = abs_path(
-                        project_id, f"frames/{previous_take.id}_tail.png"
-                    )
+                    candidate = abs_path(project_id, f"frames/{previous_take.id}_tail.png")
                     if candidate.exists():
-                        previous_tail_by_scene[scene_key] = str(candidate)
-                        break
+                        first_frame = str(candidate)
             sb = session.get(Storyboard, shot.storyboard_id) if shot.storyboard_id else None
             prompt = (sb.prompt if sb else "") or shot.description
             jobs = enqueue_video_jobs(
                 session, project_id, shot.id, 1, prompt,
-                first_frame=previous_tail_by_scene.get(scene_key),
+                first_frame=first_frame,
             )
             shot.status = "GENERATING"
             session.add(shot)
@@ -750,8 +754,6 @@ async def video_generation(state: ProductionState) -> dict:
                     abs_path(project_id, take.original_path),
                     abs_path(project_id, tail_rel),
                 )
-                if tail:
-                    previous_tail_by_scene[scene_key] = str(tail)
         completed_count += 1
         _stage_update(
             project_id,
@@ -776,6 +778,46 @@ async def video_generation(state: ProductionState) -> dict:
             project_id, "HUMAN_TAKE_REVIEW", f"本轮 {done}/{len(job_ids)} 个 Take 生成完成，等待人工复审"
         ),
         "needs_retake_shot_ids": [],
+    }
+
+
+async def asset_generation_recovery(state: ProductionState) -> dict:
+    """Retry only failed asset image jobs after ComfyUI reconnects."""
+    project_id = state["project_id"]
+    job_ids: list[str] = []
+    with _session(project_id) as session:
+        jobs = list(
+            session.exec(
+                select(GenerationJob)
+                .where(
+                    GenerationJob.project_id == project_id,
+                    GenerationJob.job_type.in_(["CHARACTER", "LOCATION"]),  # type: ignore[arg-type]
+                )
+                .order_by(GenerationJob.index)
+            )
+        )
+        for job in jobs:
+            if job.status in {"FAILED", "CANCELLED"}:
+                job.status = "PENDING"
+                job.error = None
+                job.result = {}
+                job.retry_count = 0
+                session.add(job)
+            if job.status in {"PENDING", "RUNNING", "FAILED", "CANCELLED"}:
+                job_ids.append(job.id)
+        session.commit()
+    if not job_ids:
+        raise RuntimeError("没有可恢复的资产生成任务")
+    generation_queue.notify()
+    _stage_update(project_id, "ASSET_DESIGN", f"正在恢复 {len(job_ids)} 个失败的资产图片任务")
+    statuses = await wait_for_jobs(project_id, job_ids)
+    failed = [job_id for job_id, status in statuses.items() if status != "DONE"]
+    if failed:
+        raise RuntimeError(f"资产参考图恢复失败: {failed}")
+    return {
+        **_stage_update(project_id, "ASSET_REVIEW", "资产参考图已恢复，等待人工审核"),
+        "character_ids": [],
+        "location_ids": [],
     }
 
 
@@ -1084,6 +1126,7 @@ def build_resume_graph(start_node: str = "reviewing"):
     """Resume an interrupted production from review, preserving all existing media."""
     graph = StateGraph(ProductionState)
     graph.add_node("asset_review", asset_review)
+    graph.add_node("asset_generation_recovery", asset_generation_recovery)
     graph.add_node("storyboarding", storyboarding)
     graph.add_node("storyboard_review", storyboard_review)
     graph.add_node("reviewing", reviewing)
@@ -1094,6 +1137,7 @@ def build_resume_graph(start_node: str = "reviewing"):
     graph.add_node("rendering", rendering)
     graph.add_node("complete", complete)
     graph.add_edge(START, start_node)
+    graph.add_edge("asset_generation_recovery", "asset_review")
     graph.add_edge("asset_review", "storyboarding")
     graph.add_edge("storyboarding", "storyboard_review")
     graph.add_edge("storyboard_review", "video_generation")
@@ -1128,6 +1172,7 @@ async def resume_film_pipeline(project_id: str) -> dict:
         "needs_retake_shot_ids": [],
     }
     start_node = {
+        "ASSET_DESIGN": "asset_generation_recovery",
         "ASSET_REVIEW": "asset_review",
         "STORYBOARDING": "storyboarding",
         "STORYBOARD_REVIEW": "storyboard_review",

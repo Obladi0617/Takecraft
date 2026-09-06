@@ -72,12 +72,18 @@ class OpenAICompatibleTextModel:
             payload["response_format"] = {"type": "json_object"}
         attempts = max(1, settings.llm_max_retries)
         last_error: Exception = RuntimeError("未知错误")
-        async with httpx.AsyncClient(timeout=settings.llm_timeout) as client:
-            for attempt in range(attempts):
-                try:
+        for attempt in range(attempts):
+            # ModelScope occasionally closes an upstream connection without a
+            # response.  Create a fresh client for every attempt so a broken
+            # keep-alive connection is never reused by the next retry.
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(settings.llm_timeout, connect=20.0),
+                    limits=httpx.Limits(max_keepalive_connections=0),
+                ) as client:
                     response = await client.post(
                         f"{self._base}/v1/chat/completions",
-                        headers=self._headers,
+                        headers={**self._headers, "Connection": "close"},
                         json=payload,
                     )
                     response.raise_for_status()
@@ -97,21 +103,21 @@ class OpenAICompatibleTextModel:
                     if not isinstance(content, str) or not content.strip():
                         raise ValueError("模型返回了空内容")
                     return content
-                except httpx.TransportError as exc:
-                    retryable = True
-                    last_error = exc
-                except httpx.HTTPStatusError as exc:
-                    retryable = (
-                        exc.response.status_code == 429
-                        or exc.response.status_code >= 500
-                    )
-                    last_error = exc
-                except (KeyError, IndexError, TypeError, ValueError) as exc:
-                    retryable = True
-                    last_error = RuntimeError(f"文本模型返回格式错误: {exc}")
-                if not retryable or attempt == attempts - 1:
-                    break
-                await asyncio.sleep(settings.llm_retry_base_delay * (2**attempt))
+            except httpx.TransportError as exc:
+                retryable = True
+                last_error = exc
+            except httpx.HTTPStatusError as exc:
+                retryable = (
+                    exc.response.status_code == 429
+                    or exc.response.status_code >= 500
+                )
+                last_error = exc
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                retryable = True
+                last_error = RuntimeError(f"文本模型返回格式错误: {exc}")
+            if not retryable or attempt == attempts - 1:
+                break
+            await asyncio.sleep(settings.llm_retry_base_delay * (2**attempt))
         raise RuntimeError(
             f"文本模型调用失败（已尝试 {attempts} 次）: "
             f"{type(last_error).__name__}: {last_error}"

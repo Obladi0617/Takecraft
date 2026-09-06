@@ -29,6 +29,10 @@ export default function ReviewPanel() {
   const [previewImage, setPreviewImage] = useState<{ url: string; alt: string } | null>(null)
   const [expandedShots, setExpandedShots] = useState<string[]>([])
   const [takeFeedback, setTakeFeedback] = useState<Record<string, string>>({})
+  const [selectedTakeIds, setSelectedTakeIds] = useState<string[]>([])
+  const [submittingTakeIds, setSubmittingTakeIds] = useState<string[]>([])
+  const [takeNotice, setTakeNotice] = useState('')
+  const [takeReviewError, setTakeReviewError] = useState('')
 
   useEffect(() => {
     if (!previewImage) return
@@ -58,6 +62,8 @@ export default function ReviewPanel() {
     queryFn: () => fetchAssets(projectId),
     enabled: humanReview?.stage === 'ASSET_REVIEW',
     refetchInterval: humanReview?.stage === 'ASSET_REVIEW' ? 1500 : false,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   })
 
   const scriptReview = useMutation({
@@ -67,6 +73,8 @@ export default function ReviewPanel() {
       setScriptFeedback('')
       queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
       queryClient.invalidateQueries({ queryKey: ['pipeline', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['assets', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['jobs', projectId] })
     },
   })
 
@@ -78,6 +86,8 @@ export default function ReviewPanel() {
       setSelectedAssetIds([])
       queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
       queryClient.invalidateQueries({ queryKey: ['pipeline', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['assets', projectId] })
+      queryClient.invalidateQueries({ queryKey: ['jobs', projectId] })
     },
   })
 
@@ -100,16 +110,31 @@ export default function ReviewPanel() {
     },
   })
 
-  const reviewTake = useMutation({
-    mutationFn: ({ takeId, decision }: { takeId: string; decision: 'APPROVE' | 'RETAKE' }) =>
-      submitTakeReview(projectId, takeId, decision, takeFeedback[takeId] ?? ''),
-    onSuccess: (_, variables) => {
-      setTakeFeedback((current) => ({ ...current, [variables.takeId]: '' }))
-      queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
-      queryClient.invalidateQueries({ queryKey: ['pipeline', projectId] })
-      queryClient.invalidateQueries({ queryKey: ['jobs', projectId] })
-    },
-  })
+  const refreshTakeReview = () => {
+    queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
+    queryClient.invalidateQueries({ queryKey: ['pipeline', projectId] })
+    queryClient.invalidateQueries({ queryKey: ['jobs', projectId] })
+  }
+
+  const submitOneTake = async (takeId: string, decision: 'APPROVE' | 'RETAKE') => {
+    setSubmittingTakeIds((ids) => ids.includes(takeId) ? ids : [...ids, takeId])
+    setTakeReviewError('')
+    try {
+      await submitTakeReview(projectId, takeId, decision, takeFeedback[takeId] ?? '')
+      setTakeFeedback((current) => ({ ...current, [takeId]: '' }))
+      setSelectedTakeIds((ids) => ids.filter((id) => id !== takeId))
+      if (decision === 'RETAKE') {
+        setTakeNotice('指令已接收，重新生成中。你可以继续勾选其他 Take，并分别填写修改指令。')
+      }
+      refreshTakeReview()
+      return true
+    } catch (error) {
+      setTakeReviewError(`提交失败：${String(error)}`)
+      return false
+    } finally {
+      setSubmittingTakeIds((ids) => ids.filter((id) => id !== takeId))
+    }
+  }
 
   if (!humanReview) {
     return (
@@ -270,14 +295,14 @@ export default function ReviewPanel() {
             <div className="action-buttons">
               <button
                 className="primary"
-                disabled={assetReview.isPending || assetReview.isSuccess}
+                disabled={assetReview.isPending}
                 onClick={() => assetReview.mutate('APPROVE')}
               >
                 {assetReview.isPending
-                  ? '正在提交...'
-                  : assetReview.isSuccess
-                    ? '已通过，正在生成资产参考图...'
-                    : '通过资产并继续'}
+                  ? assetReview.variables === 'REVISE'
+                    ? '已接收打回指令，重新生成中...'
+                    : '正在通过资产...'
+                  : '通过资产并继续'}
               </button>
               <button
                 disabled={assetReview.isPending || !assetFeedback.trim() || selectedAssetIds.length === 0}
@@ -390,20 +415,54 @@ export default function ReviewPanel() {
   // Take 人工复审：集中展示所有镜头，无需逐个进入镜头工作台。
   if (stage === 'HUMAN_TAKE_REVIEW') {
     const latestTakes = (humanReview.takes ?? []).filter((take) => take.is_latest)
+    const selectedTakes = latestTakes.filter((take) => selectedTakeIds.includes(take.id) && !take.is_generating)
+    const invalidSelected = selectedTakes.filter((take) => !(takeFeedback[take.id] ?? '').trim())
+    const approvableTakes = latestTakes.filter((take) => (
+      !take.is_generating
+      && take.decision?.decision !== 'APPROVE'
+      && !submittingTakeIds.includes(take.id)
+    ))
+    const rejectSelected = async () => {
+      if (invalidSelected.length > 0) {
+        setTakeReviewError(`请分别填写修改指令：${invalidSelected.map((take) => take.shot_title || take.shot_id).join('、')}`)
+        return
+      }
+      await Promise.all(selectedTakes.map((take) => submitOneTake(take.id, 'RETAKE')))
+    }
+    const approveAll = async () => {
+      setTakeNotice('')
+      await Promise.all(approvableTakes.map((take) => submitOneTake(take.id, 'APPROVE')))
+    }
     return (
       <div className="review-panel">
         <h3>Take 人工复审</h3>
+        {takeNotice && (
+          <div className="review-command-notice" role="status">
+            <span>✓ {takeNotice}</span>
+            <button aria-label="关闭提示" onClick={() => setTakeNotice('')}>×</button>
+          </div>
+        )}
         <p className="review-explainer">
-          请逐条播放最新 Take。满意就“人工通过”；不满意请写清修改方向后打回，系统只重拍这一条。
-          所有镜头通过后才会自动进入剪辑。
+          已生成的 Take 可以随时审核。勾选不满意的视频，并在各自卡片中填写独立修改指令；
+          一条重生成时仍可继续打回其他条。全部镜头通过后才会进入剪辑。
         </p>
         <div className="take-review-grid">
           {latestTakes.map((take) => (
-            <div key={take.id} className={`take-review-card ${take.decision?.decision === 'APPROVE' ? 'approved' : ''}`}>
+            <div key={take.id} className={`take-review-card ${take.decision?.decision === 'APPROVE' ? 'approved' : ''} ${selectedTakeIds.includes(take.id) ? 'selected' : ''}`}>
               <div className="take-review-heading">
                 <strong>{take.shot_title || take.shot_id}</strong>
                 <span>{take.duration?.toFixed(1) ?? '-'} 秒</span>
                 {take.decision?.decision === 'APPROVE' && <span className="badge ok">已人工通过</span>}
+                {take.is_generating && <span className="badge generating">重新生成中</span>}
+                <label className="take-reject-check">
+                  <input
+                    type="checkbox"
+                    checked={selectedTakeIds.includes(take.id)}
+                    disabled={take.is_generating || submittingTakeIds.includes(take.id)}
+                    onChange={() => setSelectedTakeIds((ids) => ids.includes(take.id) ? ids.filter((id) => id !== take.id) : [...ids, take.id])}
+                  />
+                  勾选打回
+                </label>
               </div>
               <video src={`${API_BASE}${take.media_url}`} controls preload="metadata" />
               <details>
@@ -412,27 +471,36 @@ export default function ReviewPanel() {
                 <p><strong>视频提示词：</strong>{take.prompt}</p>
               </details>
               <textarea
-                placeholder="不满意时填写具体修改方向，例如：动作太快、主体偏离画面、雷电太弱"
+                placeholder="为这一条单独填写修改指令，例如：动作太快、主体偏离画面、雷电太弱"
                 value={takeFeedback[take.id] ?? ''}
+                disabled={take.is_generating || submittingTakeIds.includes(take.id)}
                 onChange={(event) => setTakeFeedback((current) => ({ ...current, [take.id]: event.target.value }))}
               />
               <div className="action-buttons">
                 <button
                   className={take.decision?.decision === 'APPROVE' ? 'primary' : ''}
-                  disabled={reviewTake.isPending || take.decision?.decision === 'APPROVE'}
-                  onClick={() => reviewTake.mutate({ takeId: take.id, decision: 'APPROVE' })}
-                >{take.decision?.decision === 'APPROVE' ? '✓ 已通过' : '人工通过这条'}</button>
-                <button
-                  disabled={reviewTake.isPending || !(takeFeedback[take.id] ?? '').trim()}
-                  onClick={() => reviewTake.mutate({ takeId: take.id, decision: 'RETAKE' })}
-                >按意见打回，只重拍这条</button>
+                  disabled={take.is_generating || submittingTakeIds.includes(take.id) || take.decision?.decision === 'APPROVE'}
+                  onClick={() => submitOneTake(take.id, 'APPROVE')}
+                >{submittingTakeIds.includes(take.id) ? '提交中...' : take.decision?.decision === 'APPROVE' ? '✓ 已通过' : '通过这一条'}</button>
               </div>
               {take.decision?.feedback && <p className="muted">上次意见：{take.decision.feedback}</p>}
             </div>
           ))}
           {latestTakes.length === 0 && <p className="muted">Take 正在生成，完成后会自动显示在这里。</p>}
         </div>
-        {reviewTake.isError && <p className="error">提交失败：{String(reviewTake.error)}</p>}
+        {takeReviewError && <p className="error">{takeReviewError}</p>}
+        <div className="take-review-footer">
+          <span className="muted">已勾选 {selectedTakes.length} 条；每条使用各自的修改指令</span>
+          <button
+            disabled={selectedTakes.length === 0 || selectedTakes.some((take) => submittingTakeIds.includes(take.id))}
+            onClick={rejectSelected}
+          >打回已勾选（{selectedTakes.length}）</button>
+          <button
+            className="primary"
+            disabled={approvableTakes.length === 0}
+            onClick={approveAll}
+          >全部通过当前已生成（{approvableTakes.length}）</button>
+        </div>
       </div>
     )
   }

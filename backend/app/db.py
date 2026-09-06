@@ -46,7 +46,7 @@ def abs_path(project_id: str, rel_path: str) -> Path:
 
 
 def require_project(project_id: str) -> None:
-    if not project_db(project_id).exists():
+    if (project_path(project_id) / ".deleting").exists() or not project_db(project_id).exists():
         raise HTTPException(status_code=404, detail="project not found")
 
 
@@ -87,7 +87,9 @@ def get_engine(project_id: str):
 
 
 def drop_engine(project_id: str) -> None:
-    _engines.pop(project_id, None)
+    engine = _engines.pop(project_id, None)
+    if engine is not None:
+        engine.dispose()
 
 
 def project_session(project_id: str) -> Iterator[Session]:

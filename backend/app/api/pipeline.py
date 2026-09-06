@@ -281,6 +281,17 @@ def human_review_state(
             "camera_motion": storyboard_shot.camera_motion if storyboard_shot else "",
         })
     takes = []
+    generating_shot_ids = {
+        job.shot_id
+        for job in session.exec(
+            select(GenerationJob).where(
+                GenerationJob.project_id == project_id,
+                GenerationJob.job_type == "VIDEO",
+                GenerationJob.status.in_(ACTIVE_STATUSES),  # type: ignore[arg-type]
+            )
+        )
+        if job.shot_id
+    }
     for shot in session.exec(
         select(Shot).where(Shot.project_id == project_id).order_by(Shot.index)
     ):
@@ -303,6 +314,7 @@ def human_review_state(
                 "media_url": f"/media/{project_id}/{media_path}",
                 "is_latest": take.id == latest_id,
                 "is_selected": take.id == shot.selected_take_id,
+                "is_generating": shot.id in generating_shot_ids,
                 "decision": take_decisions.get(take.id),
             })
     return {
@@ -518,19 +530,19 @@ async def submit_take_review(
         body.feedback.strip(),
     )
     compliance_gate.check_or_raise(prompt, "take.human_retake", project_id)
-    # Keep continuity on manual retakes too: use the previous shot's approved
-    # (or newest available) Take tail frame when it exists in the same scene.
+    # Keep continuity on manual retakes too: every Take follows the previous
+    # project shot, including scene boundaries.
     first_frame: str | None = None
-    scene_shots = list(
+    ordered_shots = list(
         session.exec(
             select(Shot)
-            .where(Shot.project_id == project_id, Shot.scene_id == shot.scene_id)
+            .where(Shot.project_id == project_id)
             .order_by(Shot.index)
         )
     )
-    position = next((i for i, item in enumerate(scene_shots) if item.id == shot.id), -1)
+    position = next((i for i, item in enumerate(ordered_shots) if item.id == shot.id), -1)
     if position > 0:
-        previous_shot = scene_shots[position - 1]
+        previous_shot = ordered_shots[position - 1]
         previous_take = (
             session.get(Take, previous_shot.selected_take_id)
             if previous_shot.selected_take_id

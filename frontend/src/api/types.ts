@@ -320,6 +320,7 @@ export interface HumanReviewState {
     media_url: string
     is_latest: boolean
     is_selected: boolean
+    is_generating: boolean
     decision: HumanDecision | null
   }>
   take_decisions: Record<string, HumanDecision>

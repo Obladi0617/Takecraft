@@ -195,7 +195,7 @@ class ModelScopeImageGenerator:
 
 
 class ComfyUIImageGenerator:
-    """Qwen-Image text-to-image through the trusted DGX ComfyUI endpoint."""
+    """DGX image generation: Qwen text-to-image and FLUX.2 multi-reference edit."""
 
     name = "comfyui:qwen-image"
 
@@ -236,6 +236,82 @@ class ComfyUIImageGenerator:
                 "images": ["9", 0], "filename_prefix": prefix}},
         }
 
+    @staticmethod
+    def _reference_workflow(
+        request: ImageGenerationRequest, seed: int, prefix: str, image_names: list[str]
+    ) -> dict:
+        """Native FLUX.2 Dev reference-latent workflow (supports chained images)."""
+        width = max(256, (int(request.width) // 16) * 16)
+        height = max(256, (int(request.height) // 16) * 16)
+        workflow: dict[str, dict] = {
+            "1": {"class_type": "UNETLoader", "inputs": {
+                "unet_name": "flux2_dev_fp8mixed.safetensors", "weight_dtype": "default"}},
+            "2": {"class_type": "CLIPLoader", "inputs": {
+                "clip_name": "mistral_3_small_flux2_bf16.safetensors",
+                "type": "flux2", "device": "default"}},
+            "3": {"class_type": "VAELoader", "inputs": {
+                "vae_name": "full_encoder_small_decoder.safetensors"}},
+            "4": {"class_type": "CLIPTextEncode", "inputs": {
+                "text": request.prompt, "clip": ["2", 0]}},
+            "5": {"class_type": "FluxGuidance", "inputs": {
+                "conditioning": ["4", 0], "guidance": 4.0}},
+            "6": {"class_type": "EmptyFlux2LatentImage", "inputs": {
+                "width": width, "height": height, "batch_size": 1}},
+            "7": {"class_type": "RandomNoise", "inputs": {"noise_seed": seed}},
+            "8": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
+            "9": {"class_type": "Flux2Scheduler", "inputs": {
+                "steps": max(20, settings.comfyui_image_steps), "width": width, "height": height}},
+        }
+        conditioning: list[object] = ["5", 0]
+        for index, image_name in enumerate(image_names[:10]):
+            load_id = str(20 + index * 4)
+            scale_id = str(21 + index * 4)
+            encode_id = str(22 + index * 4)
+            ref_id = str(23 + index * 4)
+            workflow[load_id] = {"class_type": "LoadImage", "inputs": {"image": image_name}}
+            workflow[scale_id] = {"class_type": "ImageScaleToTotalPixels", "inputs": {
+                "image": [load_id, 0], "upscale_method": "lanczos", "megapixels": 1.0,
+                "resolution_steps": 1}}
+            workflow[encode_id] = {"class_type": "VAEEncode", "inputs": {
+                "pixels": [scale_id, 0], "vae": ["3", 0]}}
+            workflow[ref_id] = {"class_type": "ReferenceLatent", "inputs": {
+                "conditioning": conditioning, "latent": [encode_id, 0]}}
+            conditioning = [ref_id, 0]
+        workflow.update({
+            "10": {"class_type": "BasicGuider", "inputs": {
+                "model": ["1", 0], "conditioning": conditioning}},
+            "11": {"class_type": "SamplerCustomAdvanced", "inputs": {
+                "noise": ["7", 0], "guider": ["10", 0], "sampler": ["8", 0],
+                "sigmas": ["9", 0], "latent_image": ["6", 0]}},
+            "12": {"class_type": "VAEDecode", "inputs": {
+                "samples": ["11", 0], "vae": ["3", 0]}},
+            "13": {"class_type": "SaveImage", "inputs": {
+                "images": ["12", 0], "filename_prefix": prefix}},
+        })
+        return workflow
+
+    @staticmethod
+    async def _upload_references(
+        client: httpx.AsyncClient, base: str, references: list[str]
+    ) -> list[str]:
+        uploaded_names: list[str] = []
+        for index, raw_path in enumerate(references[:10]):
+            source = Path(raw_path)
+            if not source.is_file():
+                continue
+            mime = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
+            upload = await client.post(
+                f"{base}/upload/image",
+                files={"image": (f"ref_{index}_{source.name}", source.read_bytes(), mime)},
+                data={"type": "input", "subfolder": "takecraft/image_refs", "overwrite": "true"},
+            )
+            upload.raise_for_status()
+            result = upload.json()
+            uploaded_names.append("/".join(
+                part for part in (result.get("subfolder", ""), result["name"]) if part
+            ))
+        return uploaded_names
+
     async def generate(self, request: ImageGenerationRequest) -> list[GeneratedImage]:
         base = settings.comfyui_base_url.rstrip("/")
         timeout = httpx.Timeout(60.0, read=120.0)
@@ -243,7 +319,9 @@ class ComfyUIImageGenerator:
         async with httpx.AsyncClient(timeout=timeout) as client:
             health = await client.get(f"{base}/system_stats")
             health.raise_for_status()
-            await _prepare_comfyui_model(client, base, "qwen-image")
+            reference_names = await self._upload_references(client, base, request.references)
+            model_key = "flux2-reference" if reference_names else "qwen-image"
+            await _prepare_comfyui_model(client, base, model_key)
             for index in range(max(1, request.count)):
                 seed = (
                     int(request.seed) + index
@@ -251,13 +329,17 @@ class ComfyUIImageGenerator:
                     else random.SystemRandom().randrange(0, 2**48)
                 )
                 prefix = f"image/Takecraft_{uuid.uuid4().hex[:10]}"
-                workflow = self._workflow(request, seed, prefix)
+                workflow = (
+                    self._reference_workflow(request, seed, prefix, reference_names)
+                    if reference_names
+                    else self._workflow(request, seed, prefix)
+                )
                 queued = await client.post(
                     f"{base}/prompt",
                     json={"prompt": workflow, "client_id": f"takecraft-{uuid.uuid4()}"},
                 )
                 if queued.is_error:
-                    raise RuntimeError(f"DGX Qwen-Image 工作流提交失败: {queued.text[:1500]}")
+                    raise RuntimeError(f"DGX 图片工作流提交失败: {queued.text[:1500]}")
                 prompt_id = queued.json()["prompt_id"]
                 deadline = asyncio.get_running_loop().time() + settings.comfyui_timeout
                 while asyncio.get_running_loop().time() < deadline:
@@ -275,13 +357,14 @@ class ComfyUIImageGenerator:
                             if message[0] == "execution_error"
                         ]
                         raise RuntimeError(
-                            f"DGX Qwen-Image 生成失败: "
+                            f"DGX 图片生成失败: "
                             f"{(messages[-1] if messages else status)}"
                         )
-                    files = record.get("outputs", {}).get("10", {}).get("images") or []
+                    output_node = "13" if reference_names else "10"
+                    files = record.get("outputs", {}).get(output_node, {}).get("images") or []
                     if not files:
                         raise RuntimeError(
-                            f"DGX Qwen-Image 完成但没有图片输出: {record.get('outputs', {})}"
+                            f"DGX 图片生成完成但没有图片输出: {record.get('outputs', {})}"
                         )
                     item = files[0]
                     result = await client.get(
@@ -300,7 +383,7 @@ class ComfyUIImageGenerator:
                     images.append(
                         GeneratedImage(
                             path=str(destination),
-                            model=self.name,
+                            model="comfyui:flux2-reference" if reference_names else self.name,
                             seed=seed,
                             width=max(256, (int(request.width) // 16) * 16),
                             height=max(256, (int(request.height) // 16) * 16),
@@ -308,7 +391,7 @@ class ComfyUIImageGenerator:
                     )
                     break
                 else:
-                    raise TimeoutError(f"DGX Qwen-Image 任务 {prompt_id} 超过等待时间")
+                    raise TimeoutError(f"DGX 图片任务 {prompt_id} 超过等待时间")
         return images
 
 class _CloudVideoBackend:

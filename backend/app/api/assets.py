@@ -8,9 +8,10 @@ from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+from ..agents import extract_json, get_text_model
 from ..compliance import compliance_gate
 from ..db import project_session
-from ..domain import Asset, Character, Location, Scene, Shot
+from ..domain import Asset, Character, Location, Project, Scene, Shot
 from ..domain.character import CHARACTER_SOURCES, TURNAROUND_VIEWS
 from ..domain.location import LOCATION_REF_KINDS, LOCATION_SOURCES
 from ..repositories import next_seq_and_id
@@ -244,14 +245,55 @@ def delete_character(
     session.commit()
 
 
+async def _contextual_character_prompt(
+    project: Project, character: Character
+) -> str:
+    """先由文本模型结合整部影片扩写资产提示词，再交给图片队列。
+
+    手工新增的资产经常只有名称和一句描述；直接套三视图模板会丢失题材、
+    材质和姿态约束。这里要求文本模型输出单一、可复用的基底提示词，队列
+    随后再分别追加 FRONT/SIDE/BACK 的严格视角要求。
+    """
+    base = character_design_prompt(character)
+    system = (
+        "你是影视资产概念设计提示词编写师。请结合整部影片主题和当前资产设定，"
+        "为图片生成模型编写一条中文三视图基底提示词。必须明确主体是什么、时代与"
+        "世界观、材质、结构、比例、色彩、姿态和不可变特征；不得添加与剧情无关的"
+        "角色或环境。提示词供正面、侧面、背面三个视角共用，因此不要在基底提示词"
+        "中指定单一视角。输出严格JSON：{\"prompt\":\"...\"}。"
+    )
+    user = (
+        f"影片名称：{project.name}\n"
+        f"影片主题：{project.idea or project.name}\n"
+        f"资产名称：{character.name}\n"
+        f"资产描述：{character.description}\n"
+        f"外形：{character.appearance}\n"
+        f"服装或外部结构：{character.costume}\n"
+        f"视觉锚点：{'、'.join(character.visual_anchors or [])}\n"
+        f"不可变特征：{'、'.join(character.immutable_traits or [])}\n"
+        f"现有基础提示词：{base}\n"
+        "如果该资产是特洛伊木马，必须写明它是古希腊战争中的巨型木制攻城木马雕像，"
+        "由深色粗木板、木榫和加固铜件构成，四足全部稳定落地或固定在木制轮台上，"
+        "禁止真实马匹、禁止抬腿、禁止奔跑姿态，并要求三个视角结构完全一致。"
+    )
+    result = extract_json(await get_text_model().complete(system, user))
+    prompt = str(result.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=502, detail="文本API没有返回资产生图提示词")
+    return prompt
+
+
 @router.post("/characters/{character_id}/references/generate", status_code=202)
-def generate_character_refs(
+async def generate_character_refs(
     project_id: str,
     character_id: str,
     session: Session = Depends(project_session),
 ):
     character = _get_character(session, project_id, character_id)
-    prompt = character_design_prompt(character)
+    project = session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    prompt = await _contextual_character_prompt(project, character)
     compliance_gate.check_or_raise(prompt, "character.turnaround", project_id)
     job = enqueue_character_turnaround(session, project_id, character, prompt)
     return {"job": job.model_dump()}

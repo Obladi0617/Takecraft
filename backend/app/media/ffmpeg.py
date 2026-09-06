@@ -109,7 +109,7 @@ def extract_tail_frame(src: Path, dst: Path, offset: float = 0.12) -> Path | Non
     dst.parent.mkdir(parents=True, exist_ok=True)
     result = subprocess.run(
         [FFMPEG, "-y", "-sseof", f"-{max(offset, 0.04):.3f}", "-i", str(src),
-         "-frames:v", "1", str(dst)],
+         "-frames:v", "1", "-update", "1", str(dst)],
         capture_output=True,
         text=True,
     )

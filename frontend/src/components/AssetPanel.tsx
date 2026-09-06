@@ -357,7 +357,11 @@ export default function AssetPanel() {
   const { data: assets } = useQuery({
     queryKey: ['assets', projectId],
     queryFn: () => fetchAssets(projectId),
-    refetchInterval: assetJobsActive ? 1500 : false,
+    // 生成任务完成与 jobs 轮询更新存在竞态；持续轻量轮询可保证最后一次
+    // 覆盖后的带版本 media_url 自动进入页面，无需人工刷新。
+    refetchInterval: 1500,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   })
 
   const { data: scenes } = useQuery({

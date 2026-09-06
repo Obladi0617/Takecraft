@@ -243,6 +243,7 @@ class GenerationQueue:
                 width=int(payload.get("width", 1024)),
                 height=int(payload.get("height", 576)),
                 seed=owner.seed,
+                references=[str(path) for path in payload.get("references") or []],
             )
             images = await generator.generate(request)
             if not images:

@@ -1,5 +1,6 @@
 import json
 import shutil
+import time
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -79,5 +80,18 @@ def delete_project(project_id: str):
     path = project_path(project_id)
     if not path.exists():
         raise HTTPException(status_code=404, detail="project not found")
+    deleting_marker = path / ".deleting"
+    deleting_marker.write_text("deleting", encoding="utf-8")
     drop_engine(project_id)
-    shutil.rmtree(path)
+    last_error: OSError | None = None
+    for attempt in range(5):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError as exc:
+            last_error = exc
+            if attempt < 4:
+                time.sleep(0.15 * (attempt + 1))
+    if deleting_marker.exists():
+        deleting_marker.unlink()
+    raise HTTPException(status_code=409, detail=f"项目文件仍被占用，请稍后重试: {last_error}")
