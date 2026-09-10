@@ -1,3 +1,13 @@
+---
+domain:
+  - multi-modal
+tags:
+  - agent
+  - video-generation
+  - human-in-the-loop
+license: Apache License 2.0
+---
+
 # AI Film Agent
 
 > **当前 DGX Spark 真视频版使用方法：见 [README-DGX.md](README-DGX.md)。**
