@@ -144,10 +144,11 @@ export default function ReviewPanel() {
     setSubmittingTakeIds((ids) => ids.includes(sceneId) ? ids : [...ids, sceneId])
     setTakeReviewError('')
     try {
-      await submitSceneReview(projectId, sceneId, decision, takeFeedback[sceneId] ?? '')
+      const result = await submitSceneReview(projectId, sceneId, decision, takeFeedback[sceneId] ?? '')
       setTakeFeedback((current) => ({ ...current, [sceneId]: '' }))
       setSelectedTakeIds((ids) => ids.filter((id) => id !== sceneId))
-      setTakeNotice(decision === 'RETAKE' ? '整场修改指令已提交，DGX 正按剧本总时长重新生成。' : '该场景已通过。')
+      setTakeNotice(decision === 'RETAKE' ? '整场修改指令已提交，DGX 正按剧本总时长重新生成。' : result.auto_edited ? '全部场景已通过，已自动剪辑到时间线。' : '该场景已通过，全部通过后将自动剪辑。')
+      queryClient.invalidateQueries({ queryKey: ['timeline', projectId] })
       refreshTakeReview()
     } catch (error) {
       setTakeReviewError(`提交失败：${String(error)}`)

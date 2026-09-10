@@ -620,7 +620,20 @@ async def submit_scene_review(
             shot.status = "HUMAN_APPROVED"
             session.add(shot)
         session.commit()
-        return {"ok": True, "review_id": review.id, "decision": decision}
+        scenes = list(session.exec(select(Scene).where(Scene.project_id == project_id)))
+        all_approved = all(
+            (approval := _latest_artifact(session, project_id, "human_scene_review", item.id))
+            and approval.data.get("decision") == "APPROVE"
+            for item in scenes
+        )
+        timeline = None
+        if all_approved:
+            from ..services.timeline import auto_edit_timeline
+            project_shots = list(session.exec(select(Shot).where(Shot.project_id == project_id)))
+            if project_shots and all(s.selected_take_id for s in project_shots):
+                timeline = auto_edit_timeline(project_id, session)
+        return {"ok": True, "review_id": review.id, "decision": decision,
+                "auto_edited": timeline is not None}
 
     shot_ids = [shot.id for shot in shots]
     active = session.exec(select(GenerationJob).where(
@@ -808,7 +821,10 @@ def get_pipeline(project_id: str, session: Session = Depends(project_session)):
             .order_by(AgentArtifact.index)
         )
     ]
-    return {"job": _job_dict(job) if job else None, "stages": stages}
+    renders = list(abs_path(project_id, "renders").glob("final_*.mp4"))
+    latest_render = max(renders, key=lambda path: path.stat().st_mtime) if renders else None
+    return {"job": _job_dict(job) if job else None, "stages": stages,
+            "render_url": f"/media/{project_id}/renders/{latest_render.name}" if latest_render else None}
 
 
 @router.get("/artifacts")

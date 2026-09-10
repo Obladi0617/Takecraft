@@ -1106,7 +1106,8 @@ async def rendering(state: ProductionState) -> dict:
         )
         pairs = []
         for clip in clips:
-            take = session.get(Take, clip.take_id) if clip.take_id else None
+            from ..services.timeline import resolve_clip_take
+            take = resolve_clip_take(session, clip)
             if take is not None:
                 pairs.append((clip, take))
     if not pairs:

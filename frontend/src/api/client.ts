@@ -375,7 +375,7 @@ export const submitSceneReview = (
   sceneId: string,
   decision: 'APPROVE' | 'RETAKE',
   feedback = '',
-) => api<{ ok: boolean; review_id: string; decision: string; job?: GenerationJob }>(
+) => api<{ ok: boolean; review_id: string; decision: string; job?: GenerationJob; auto_edited?: boolean }>(
   `/api/v1/projects/${pid}/scenes/${sceneId}/human-review`,
   { method: 'POST', body: JSON.stringify({ decision, feedback }) },
 )

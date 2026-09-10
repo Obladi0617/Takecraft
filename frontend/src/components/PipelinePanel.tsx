@@ -56,14 +56,14 @@ export default function PipelinePanel() {
     return () => window.removeEventListener('keydown', closeOnEscape)
   }, [showRender])
 
-  if (!job) return null
+  if (!job && !data?.render_url) return null
 
   const seen = new Map(stages.map((s) => [s.stage, s]))
   const lastStage = stages.length > 0 ? stages[stages.length - 1].stage : null
   const retakeCount = stages.filter((s) => s.stage === 'REVIEWING').length - 1
   const blockedReason =
-    (job.result?.blocked_reason as string | undefined) || null
-  const renderUrl = job.result?.render_url as string | undefined
+    (job?.result?.blocked_reason as string | undefined) || null
+  const renderUrl = data?.render_url || job?.result?.render_url as string | undefined
 
   return (
     <div className={`pipeline-panel status-${(status ?? '').toLowerCase()}`}>
@@ -125,7 +125,7 @@ export default function PipelinePanel() {
           className="pipeline-render"
           onClick={() => setShowRender(true)}
         >
-          在当前页面查看成片
+          查看成片
         </button>
       )}
 
@@ -146,7 +146,7 @@ export default function PipelinePanel() {
         <p className="muted pipeline-blocked">兜底说明：{blockedReason}</p>
       )}
 
-      {job.error && <p className="error">{job.error}</p>}
+      {job?.error && <p className="error">{renderUrl ? '历史流程记录：' : ''}{job.error}</p>}
     </div>
   )
 }

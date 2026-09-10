@@ -4,8 +4,8 @@ from sqlalchemy import delete
 from sqlmodel import Session, select
 
 from ..db import project_session
-from ..domain import Shot, Take, TimelineClip
-from ..services.timeline import auto_edit_timeline
+from ..domain import Asset, Shot, Take, TimelineClip
+from ..services.timeline import auto_edit_timeline, resolve_clip_take
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["timeline"])
 
@@ -45,7 +45,8 @@ def _timeline_response(project_id: str, session: Session) -> dict:
     items = []
     total = 0.0
     for clip in clips:
-        take = session.get(Take, clip.take_id) if clip.take_id else None
+        take = resolve_clip_take(session, clip)
+        asset = session.get(Asset, clip.asset_id) if clip.asset_id else None
         shot = session.get(Shot, clip.shot_id) if clip.shot_id else None
         media_rel = (take.proxy_path or take.original_path) if take else None
         source_out = clip.source_out
@@ -61,7 +62,7 @@ def _timeline_response(project_id: str, session: Session) -> dict:
             {
                 **clip.model_dump(),
                 "source_out": source_out,
-                "shot_title": shot.title if shot else None,
+                "shot_title": asset.meta.get("title") if asset else shot.title if shot else None,
                 "media_url": f"/media/{project_id}/{media_rel}" if media_rel else None,
             }
         )

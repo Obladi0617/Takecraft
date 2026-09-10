@@ -5,6 +5,7 @@ from ..compliance import compliance_gate
 from ..db import project_session
 from ..domain import Take, TimelineClip
 from ..media.render import render_timeline
+from ..services.timeline import resolve_clip_take
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["renders"])
 
@@ -22,9 +23,7 @@ def render(project_id: str, session: Session = Depends(project_session)):
 
     pairs = []
     for clip in clips:
-        if not clip.take_id:
-            raise HTTPException(status_code=400, detail=f"片段 {clip.id} 未关联 Take")
-        take = session.get(Take, clip.take_id)
+        take = resolve_clip_take(session, clip)
         if take is None:
             raise HTTPException(status_code=400, detail=f"Take 不存在: {clip.take_id}")
         pairs.append((clip, take))

@@ -92,6 +92,7 @@ export interface PipelineStageNote {
 }
 
 export interface PipelineResponse {
+  render_url?: string | null
   job: PipelineJob | null
   stages: PipelineStageNote[]
 }
