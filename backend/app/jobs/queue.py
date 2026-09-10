@@ -526,8 +526,6 @@ class GenerationQueue:
         duration = probe_duration(staged) or video.duration
         target_duration = max(float(shot.duration_target), 1.0)
         if duration > target_duration + 0.02:
-            from ..media.ffmpeg import trim_to_duration
-
             trimmed = staged.with_name(f"{staged.stem}_trimmed.mp4")
             if await asyncio.to_thread(
                 trim_to_duration, staged, trimmed, target_duration
