@@ -17,6 +17,7 @@ from ..agents.film_agents import (
     director_bible,
     location_cards,
     producer_plan,
+    prompt_scene_video,
     prompt_storyboard,
     revise_character_cards,
     revise_location_cards,
@@ -47,6 +48,7 @@ from ..jobs import generation_queue
 from ..repositories import next_seq_and_id
 from ..services.assets import (
     character_design_prompt,
+    character_prompt_block,
     create_assets_from_cards,
     enqueue_asset_job,
     enqueue_character_turnaround,
@@ -54,14 +56,17 @@ from ..services.assets import (
     character_reference_sheets,
     link_shots_to_assets,
     location_design_prompt,
+    location_prompt_block,
     lock_character,
     lock_location,
+    refs_of,
     shot_asset_blocks,
 )
 from ..services.generation import (
     enqueue_compare_jobs,
     enqueue_review_jobs,
     enqueue_storyboard_job,
+    enqueue_scene_video_job,
     enqueue_video_jobs,
     record_artifact,
     select_and_lock_storyboard,
@@ -699,7 +704,10 @@ async def storyboard_review(state: ProductionState) -> dict:
 
 
 async def video_generation(state: ProductionState) -> dict:
-    """按生产计划入队 VIDEO 任务并等待完成（RETAKE 轮次只补拍未过审镜头）。"""
+    """每个大场景合成一个 R2V 任务，再按剧本时长切回各 Take。"""
+    import logging
+
+    logger = logging.getLogger(__name__)
     project_id = state["project_id"]
     targets = state.get("needs_retake_shot_ids") or state.get("shot_ids") or []
     job_ids: list[str] = []
@@ -709,56 +717,119 @@ async def video_generation(state: ProductionState) -> dict:
         "HUMAN_TAKE_REVIEW",
         f"视频逐镜生成中（0/{len(targets)}）；每完成一条即可立即播放复审",
     )
-    # 全片顺序生成：每一个 Take 都使用上一个 Take 的尾帧作为首帧，
-    # 场景切换也不断链。
     with _session(project_id) as session:
         ordered = [s for s in _shots_of_project(session, project_id) if s.id in targets]
+        screenplay = _latest_artifact(session, project_id, "screenplay")
+        bible = _latest_artifact(session, project_id, "director_bible")
+    groups: list[tuple[str, list[Shot]]] = []
     for shot in ordered:
-        shot_id = shot.id
+        key = shot.scene_id or f"shot:{shot.id}"
+        if not groups or groups[-1][0] != key:
+            groups.append((key, []))
+        groups[-1][1].append(shot)
+    model = get_text_model()
+    for scene_id, scene_shots in groups:
         with _session(project_id) as session:
-            shot = session.get(Shot, shot_id)
-            if shot is None:
-                continue
-            first_frame: str | None = None
-            project_shots = _shots_of_project(session, project_id)
-            position = next((i for i, item in enumerate(project_shots) if item.id == shot.id), -1)
-            if position > 0:
-                previous_shot = project_shots[position - 1]
-                previous_takes = takes_of_shot(session, project_id, previous_shot.id)
-                if previous_takes:
-                    previous_take = previous_takes[-1]
-                    candidate = abs_path(project_id, f"frames/{previous_take.id}_tail.png")
-                    if candidate.exists():
-                        first_frame = str(candidate)
-            sb = session.get(Storyboard, shot.storyboard_id) if shot.storyboard_id else None
-            prompt = (sb.prompt if sb else "") or shot.description
-            jobs = enqueue_video_jobs(
-                session, project_id, shot.id, 1, prompt,
-                first_frame=first_frame,
+            scene = session.get(Scene, scene_id) if not scene_id.startswith("shot:") else None
+            references: list[str] = []
+            characters: list[dict] = []
+            locations: list[dict] = []
+            shot_specs: list[dict] = []
+            for shot in scene_shots:
+                current = session.get(Shot, shot.id)
+                if current is None:
+                    continue
+                assets = shot_asset_blocks(session, project_id, current)
+                for block in assets.get("characters") or []:
+                    if block not in characters:
+                        characters.append(block)
+                if assets.get("location") and assets["location"] not in locations:
+                    locations.append(assets["location"])
+                # Scene R2V gets the actual locked character and location sheets,
+                # rather than the three-image cap used by storyboard generation.
+                owner_ids = [*(current.character_ids or [])]
+                if current.location_id:
+                    owner_ids.append(current.location_id)
+                for owner_id in owner_ids:
+                    for asset in refs_of(session, project_id, owner_id):
+                        ref = str(abs_path(project_id, asset.path))
+                        if ref not in references:
+                            references.append(ref)
+                shot_specs.append({"id": current.id, "title": current.title,
+                    "description": current.description, "framing": current.framing,
+                    "camera_motion": current.camera_motion, "duration": current.duration_target})
+            scene_data = {"id": scene_id, "title": scene.title if scene else "",
+                          "description": scene.description if scene else ""}
+            # Include named props/armies such as the Trojan horse even when an
+            # older project was created before those assets were linked to Shot.character_ids.
+            searchable = " ".join([scene_data["title"], scene_data["description"], *(
+                f"{item['title']} {item['description']}" for item in shot_specs)])
+            candidates = list(session.exec(select(Character).where(
+                Character.project_id == project_id, Character.status == "LOCKED")))
+            for character in candidates:
+                aliases = {character.name, character.name.replace("特洛伊", "")}
+                if any(alias and alias in searchable for alias in aliases):
+                    block = character.prompt_block or character_prompt_block(character)
+                    if block not in characters:
+                        characters.append(block)
+                    for asset in refs_of(session, project_id, character.id):
+                        ref = str(abs_path(project_id, asset.path))
+                        if ref not in references:
+                            references.append(ref)
+            location_candidates = list(session.exec(select(Location).where(
+                Location.project_id == project_id, Location.status == "LOCKED")))
+            for location in location_candidates:
+                aliases = {location.name, location.name.replace("特洛伊", ""),
+                           location.name.replace("被毁灭的", "")}
+                if any(alias and alias in searchable for alias in aliases):
+                    block = location.prompt_block or location_prompt_block(location)
+                    if block not in locations:
+                        locations.append(block)
+                    for asset in refs_of(session, project_id, location.id):
+                        ref = str(abs_path(project_id, asset.path))
+                        if ref not in references:
+                            references.append(ref)
+        # Every new scene generation must go through the text model.  Reusing
+        # an old failed job's prompt hid ModelScope failures and made the UI
+        # appear to skip the text-API stage entirely.
+        logger.info("[SCENE_PROMPT] submitting scene %s to the text API", scene_id)
+        try:
+            prompt = await prompt_scene_video(
+                model, screenplay, bible, scene_data, shot_specs, characters, locations
             )
-            shot.status = "GENERATING"
-            session.add(shot)
-            session.commit()
-            job_ids.extend(job.id for job in jobs)
-        shot_statuses = await wait_for_jobs(project_id, [job.id for job in jobs])
-        if any(status != "DONE" for status in shot_statuses.values()):
-            raise RuntimeError(f"镜头 {shot_id} 视频生成失败: {shot_statuses}")
+        except Exception as exc:
+            raise RuntimeError(
+                f"场景 {scene_data['title'] or scene_id} 的魔搭文本提示词生成失败；"
+                "未提交R2V任务，请先检查魔搭API连接："
+                f"{exc}"
+            ) from exc
+        _compliance_guard(project_id, prompt, "pipeline.video.scene_prompt")
         with _session(project_id) as session:
-            generated = takes_of_shot(session, project_id, shot_id)
-            if generated:
-                from ..media.ffmpeg import extract_tail_frame
-                take = generated[-1]
-                tail_rel = f"frames/{take.id}_tail.png"
-                tail = await asyncio.to_thread(
-                    extract_tail_frame,
-                    abs_path(project_id, take.original_path),
-                    abs_path(project_id, tail_rel),
-                )
-        completed_count += 1
+            job = enqueue_scene_video_job(session, project_id, scene_id,
+                [shot.id for shot in scene_shots], prompt,
+                sum(max(float(shot.duration_target), 1.0) for shot in scene_shots),
+                references[:9])
+            for shot in scene_shots:
+                current = session.get(Shot, shot.id)
+                if current:
+                    current.status = "GENERATING"
+                    session.add(current)
+            session.commit()
+            job_ids.append(job.id)
+        # A 1 MP MiniMax H3 R2V render commonly takes 25-40 minutes on DGX.
+        # Keep the orchestration wait longer than the adapter deadline so the
+        # outer pipeline never marks a healthy RUNNING render as failed.
+        video_wait_timeout = max(float(settings.comfyui_timeout) + 300.0, 3600.0)
+        shot_statuses = await wait_for_jobs(
+            project_id, [job.id], timeout=video_wait_timeout
+        )
+        if shot_statuses.get(job.id) != "DONE":
+            raise RuntimeError(f"场景 {scene_id} 视频生成失败: {shot_statuses}")
+        completed_count += len(scene_shots)
         _stage_update(
             project_id,
             "HUMAN_TAKE_REVIEW",
-            f"视频逐镜生成中（{completed_count}/{len(targets)}）；已完成的 Take 可立即播放复审",
+            f"完整场景视频生成中（已覆盖 {completed_count}/{len(targets)} 个剧本镜头）；小镜头仅用于控制场景内部节奏",
         )
 
     statuses = {job_id: "DONE" for job_id in job_ids}
@@ -775,7 +846,7 @@ async def video_generation(state: ProductionState) -> dict:
         session.commit()
     return {
         **_stage_update(
-            project_id, "HUMAN_TAKE_REVIEW", f"本轮 {done}/{len(job_ids)} 个 Take 生成完成，等待人工复审"
+            project_id, "HUMAN_TAKE_REVIEW", f"本轮 {done}/{len(job_ids)} 个完整场景视频生成完成，等待人工复审"
         ),
         "needs_retake_shot_ids": [],
     }

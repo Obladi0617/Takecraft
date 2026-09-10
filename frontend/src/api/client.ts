@@ -158,6 +158,12 @@ export const lockStoryboard = (pid: string, sbId: string) =>
     method: 'POST',
   })
 
+export const restoreAssetVersion = (pid: string, assetId: string, versionId: string) =>
+  api<{ ok: boolean; media_url: string }>(`/api/v1/projects/${pid}/assets/${assetId}/restore`, {
+    method: 'POST',
+    body: JSON.stringify({ version_id: versionId }),
+  })
+
 export const generateTakes = (
   pid: string,
   shotId: string,
@@ -222,6 +228,12 @@ export const patchCharacter = (
     body: JSON.stringify(body),
   })
 
+export const reviseCharacterSetting = (pid: string, characterId: string, feedback: string) =>
+  api<Character & { job: GenerationJob; message: string }>(`/api/v1/projects/${pid}/characters/${characterId}/revise-setting`, {
+    method: 'POST',
+    body: JSON.stringify({ feedback }),
+  })
+
 export const deleteCharacter = (pid: string, characterId: string) =>
   api<void>(`/api/v1/projects/${pid}/characters/${characterId}`, { method: 'DELETE' })
 
@@ -247,12 +259,12 @@ export function uploadCharacterRef(
 }
 
 export const lockCharacter = (pid: string, characterId: string) =>
-  api<Character>(`/api/v1/projects/${pid}/characters/${characterId}/lock`, {
+  api<Character & { location_jobs?: GenerationJob[]; message?: string }>(`/api/v1/projects/${pid}/characters/${characterId}/lock`, {
     method: 'POST',
   })
 
 export const createLocation = (pid: string, body: LocationBody) =>
-  api<Location>(`/api/v1/projects/${pid}/locations`, {
+  api<Location & { job?: GenerationJob | null; message?: string }>(`/api/v1/projects/${pid}/locations`, {
     method: 'POST',
     body: JSON.stringify(body),
   })
@@ -266,6 +278,12 @@ export const patchLocation = (
     method: 'PATCH',
     body: JSON.stringify(body),
   })
+
+export const reviseLocationSetting = (pid: string, locationId: string, feedback: string) =>
+  api<Location & { job: GenerationJob; message: string }>(
+    `/api/v1/projects/${pid}/locations/${locationId}/revise-setting`,
+    { method: 'POST', body: JSON.stringify({ feedback }) },
+  )
 
 export const deleteLocation = (pid: string, locationId: string) =>
   api<void>(`/api/v1/projects/${pid}/locations/${locationId}`, { method: 'DELETE' })
@@ -352,3 +370,13 @@ export const submitTakeReview = (
     method: 'POST',
     body: JSON.stringify({ decision, feedback }),
   })
+
+export const submitSceneReview = (
+  pid: string,
+  sceneId: string,
+  decision: 'APPROVE' | 'RETAKE',
+  feedback = '',
+) => api<{ ok: boolean; review_id: string; decision: string; job?: GenerationJob }>(
+  `/api/v1/projects/${pid}/scenes/${sceneId}/human-review`,
+  { method: 'POST', body: JSON.stringify({ decision, feedback }) },
+)

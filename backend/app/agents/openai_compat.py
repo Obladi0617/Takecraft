@@ -2,6 +2,7 @@
 
 import asyncio
 import httpx
+from urllib.parse import urlsplit, urlunsplit
 
 from ..config import settings
 
@@ -18,6 +19,54 @@ class OpenAICompatibleTextModel:
         return settings.llm_base_url.rstrip("/")
 
     @property
+    def _api_base(self) -> str:
+        """Return an OpenAI-compatible v1 base without ever doubling /v1."""
+        return self._base if self._base.endswith("/v1") else f"{self._base}/v1"
+
+    @property
+    def _transport_base(self) -> str:
+        """Optionally connect to a fixed IP while preserving Host and TLS SNI."""
+        if not settings.llm_connect_ip:
+            return self._api_base
+        parsed = urlsplit(self._api_base)
+        port = f":{parsed.port}" if parsed.port else ""
+        return urlunsplit(
+            (parsed.scheme, f"{settings.llm_connect_ip}{port}", parsed.path, "", "")
+        )
+
+    def _client(self, *, timeout: httpx.Timeout | float) -> httpx.AsyncClient:
+        transport = httpx.AsyncHTTPTransport(
+            local_address=settings.llm_local_address or "0.0.0.0"
+        )
+        return httpx.AsyncClient(
+            timeout=timeout,
+            transport=transport,
+            limits=httpx.Limits(max_keepalive_connections=0),
+        )
+
+    def _request(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        path: str,
+        *,
+        payload: dict | None = None,
+    ) -> httpx.Request:
+        headers = {**self._headers, "Connection": "close"}
+        request = client.build_request(
+            method,
+            f"{self._transport_base}/{path.lstrip('/')}",
+            headers=headers,
+            json=payload,
+        )
+        if settings.llm_connect_ip:
+            hostname = urlsplit(self._api_base).hostname
+            if hostname:
+                request.headers["Host"] = hostname
+                request.extensions["sni_hostname"] = hostname
+        return request
+
+    @property
     def _headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {settings.llm_api_key}",
@@ -27,12 +76,8 @@ class OpenAICompatibleTextModel:
     async def health(self) -> dict:
         """探测模型列表，不消耗生成 token。"""
         try:
-            async with httpx.AsyncClient(
-                timeout=min(settings.llm_timeout, 15.0)
-            ) as client:
-                response = await client.get(
-                    f"{self._base}/v1/models", headers=self._headers
-                )
+            async with self._client(timeout=min(settings.llm_timeout, 15.0)) as client:
+                response = await client.send(self._request(client, "GET", "models"))
                 response.raise_for_status()
                 data = response.json().get("data", [])
             model_ids = [
@@ -42,7 +87,7 @@ class OpenAICompatibleTextModel:
                 "ok": True,
                 "backend": self.name,
                 "model": settings.llm_model,
-                "base_url": self._base,
+                "base_url": self._api_base,
                 "model_available": not model_ids or settings.llm_model in model_ids,
                 "available_models": model_ids[:20],
             }
@@ -51,7 +96,7 @@ class OpenAICompatibleTextModel:
                 "ok": False,
                 "backend": self.name,
                 "model": settings.llm_model,
-                "base_url": self._base,
+                "base_url": self._api_base,
                 "error": f"{type(exc).__name__}: {exc}",
             }
 
@@ -70,6 +115,13 @@ class OpenAICompatibleTextModel:
             payload["reasoning_effort"] = settings.llm_reasoning_effort
         if settings.llm_json_mode:
             payload["response_format"] = {"type": "json_object"}
+
+        # Log request size for debugging 400 errors
+        import logging
+        logger = logging.getLogger(__name__)
+        total_chars = len(system) + len(user)
+        logger.info(f"Text model request: model={settings.llm_model}, total_chars={total_chars}, max_tokens={payload.get('max_tokens')}")
+
         attempts = max(1, settings.llm_max_retries)
         last_error: Exception = RuntimeError("未知错误")
         for attempt in range(attempts):
@@ -77,14 +129,11 @@ class OpenAICompatibleTextModel:
             # response.  Create a fresh client for every attempt so a broken
             # keep-alive connection is never reused by the next retry.
             try:
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(settings.llm_timeout, connect=20.0),
-                    limits=httpx.Limits(max_keepalive_connections=0),
+                async with self._client(
+                    timeout=httpx.Timeout(settings.llm_timeout, connect=20.0)
                 ) as client:
-                    response = await client.post(
-                        f"{self._base}/v1/chat/completions",
-                        headers={**self._headers, "Connection": "close"},
-                        json=payload,
+                    response = await client.send(
+                        self._request(client, "POST", "chat/completions", payload=payload)
                     )
                     response.raise_for_status()
                     data = response.json()
@@ -111,6 +160,13 @@ class OpenAICompatibleTextModel:
                     exc.response.status_code == 429
                     or exc.response.status_code >= 500
                 )
+                # Log response body for 400 errors to understand rejection reason
+                if exc.response.status_code == 400:
+                    try:
+                        error_body = exc.response.text[:500]
+                        logger.error(f"ModelScope 400 error details: {error_body}")
+                    except Exception:
+                        pass
                 last_error = exc
             except (KeyError, IndexError, TypeError, ValueError) as exc:
                 retryable = True

@@ -97,6 +97,33 @@ def enqueue_video_jobs(
     return jobs
 
 
+def enqueue_scene_video_job(
+    session: Session,
+    project_id: str,
+    scene_id: str,
+    shot_ids: list[str],
+    prompt: str,
+    duration: float,
+    references: list[str],
+) -> GenerationJob:
+    """One R2V request for all Takes in a large scene; no first/last frame."""
+    if not shot_ids:
+        raise ValueError("scene video job requires at least one shot")
+    index, job_id = next_seq_and_id(session, GenerationJob, project_id, "job")
+    job = GenerationJob(
+        id=job_id, project_id=project_id, shot_id=shot_ids[0], index=index,
+        job_type="VIDEO",
+        payload={"mode": "scene_r2v", "scene_id": scene_id, "shot_id": shot_ids[0],
+                 "shot_ids": shot_ids, "prompt": prompt, "duration": duration,
+                 "references": list(references)},
+    )
+    session.add(job)
+    session.commit()
+    session.refresh(job)
+    generation_queue.notify()
+    return job
+
+
 def enqueue_review_jobs(
     session: Session, project_id: str, targets: list[tuple[str, str]]
 ) -> list[GenerationJob]:
@@ -196,8 +223,12 @@ async def wait_for_jobs(
         if all(statuses.get(j) in TERMINAL for j in job_ids):
             return statuses
         await asyncio.sleep(interval)
+    # Do not leak a stale PENDING/RUNNING value to callers after the deadline.
+    # Callers previously interpreted that value as a real generation failure,
+    # even though the adapter was still working in the background.
     for job_id in job_ids:
-        statuses.setdefault(job_id, "TIMEOUT")
+        if statuses.get(job_id) not in TERMINAL:
+            statuses[job_id] = "TIMEOUT"
     return statuses
 
 

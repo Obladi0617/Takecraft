@@ -12,7 +12,7 @@ const CANONICAL_STAGES: { key: string; label: string; agent: string }[] = [
   { key: 'STORYBOARD_REVIEW', label: '分镜人工审核', agent: 'Human' },
   { key: 'VIDEO_GENERATION', label: '视频生成', agent: '生成队列' },
   { key: 'REVIEWING', label: '质量审核', agent: 'Reviewer' },
-  { key: 'HUMAN_TAKE_REVIEW', label: 'Take 人工复审', agent: 'Human' },
+  { key: 'HUMAN_TAKE_REVIEW', label: '场景视频人工复审', agent: 'Human' },
   { key: 'TAKE_SELECTION', label: '选片', agent: 'Reviewer' },
   { key: 'PREVIEW', label: '自动剪辑', agent: 'Editor' },
   { key: 'RENDERING', label: '成片渲染', agent: 'FFmpeg' },

@@ -11,7 +11,7 @@ from sqlmodel import Session, select
 from ..agents import extract_json, get_text_model
 from ..compliance import compliance_gate
 from ..db import project_session
-from ..domain import Asset, Character, Location, Project, Scene, Shot
+from ..domain import Asset, Character, GenerationJob, Location, Project, Scene, Shot
 from ..domain.character import CHARACTER_SOURCES, TURNAROUND_VIEWS
 from ..domain.location import LOCATION_REF_KINDS, LOCATION_SOURCES
 from ..repositories import next_seq_and_id
@@ -27,6 +27,7 @@ from ..services.assets import (
     lock_character,
     lock_location,
     refs_of,
+    restore_asset_version,
     stable_seed,
     store_uploaded_asset,
 )
@@ -61,6 +62,10 @@ class CharacterPatch(BaseModel):
     immutable_traits: list[str] | None = None
 
 
+class CharacterRevisionIn(BaseModel):
+    feedback: str
+
+
 class LocationIn(BaseModel):
     name: str
     scene_id: str | None = None
@@ -88,12 +93,24 @@ class LocationPatch(BaseModel):
     lighting_rules: list[str] | None = None
 
 
+class LocationRevisionIn(BaseModel):
+    feedback: str
+
+
+class AssetRestoreIn(BaseModel):
+    version_id: str
+
+
 def _refs(session: Session, project_id: str, owner_id: str) -> list[dict]:
     return [
         {
             **a.model_dump(),
             "view": a.meta.get("view"),
             "media_url": asset_media_url(project_id, a),
+            "versions": [
+                {**item, "media_url": f"/media/{project_id}/{item.get('path')}"}
+                for item in list((a.meta or {}).get("versions") or [])
+            ],
         }
         for a in refs_of(session, project_id, owner_id)
     ]
@@ -123,6 +140,50 @@ def _delete_references(session: Session, project_id: str, owner_id: str) -> None
     """只删除数据库引用；磁盘原图保留，避免误删用户素材。"""
     for asset in refs_of(session, project_id, owner_id):
         session.delete(asset)
+
+
+def _enqueue_pending_locations_after_character_lock(
+    session: Session, project_id: str
+) -> list[GenerationJob]:
+    """全部角色确认后自动生成尚未完成的场景图，并防止重复入队。"""
+    characters = list(
+        session.exec(select(Character).where(Character.project_id == project_id))
+    )
+    if not characters or any(character.status != "LOCKED" for character in characters):
+        return []
+    active_jobs = list(
+        session.exec(
+            select(GenerationJob).where(
+                GenerationJob.project_id == project_id,
+                GenerationJob.job_type == "LOCATION",
+                GenerationJob.status.in_(["PENDING", "RUNNING", "RETAKE"]),  # type: ignore[arg-type]
+            )
+        )
+    )
+    busy_owner_ids = {
+        str((job.payload or {}).get("owner_id") or "") for job in active_jobs
+    }
+    queued: list[GenerationJob] = []
+    locations = list(
+        session.exec(
+            select(Location)
+            .where(Location.project_id == project_id)
+            .order_by(Location.index)
+        )
+    )
+    for location in locations:
+        completed_views = {str(asset.meta.get("view") or "") for asset in refs_of(session, project_id, location.id)}
+        if set(LOCATION_REF_KINDS).issubset(completed_views) or location.id in busy_owner_ids:
+            continue
+        queued.append(
+            enqueue_location_refs(
+                session, project_id, location, location_design_prompt(location)
+            )
+        )
+    # enqueue 中的后续 commit 会让前面返回的 ORM 实例过期；统一刷新，避免响应里出现空对象。
+    for job in queued:
+        session.refresh(job)
+    return queued
 
 
 @router.get("/assets")
@@ -159,6 +220,31 @@ def list_assets(project_id: str, session: Session = Depends(project_session)):
             for loc in locations
         ],
     }
+
+
+@router.post("/assets/{asset_id}/restore")
+def restore_asset(
+    project_id: str,
+    asset_id: str,
+    body: AssetRestoreIn,
+    session: Session = Depends(project_session),
+):
+    asset = session.get(Asset, asset_id)
+    if asset is None or asset.project_id != project_id:
+        raise HTTPException(status_code=404, detail="asset not found")
+    try:
+        restored = restore_asset_version(session, project_id, asset, body.version_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=410, detail=str(exc)) from exc
+    owner_id = str((restored.meta or {}).get("owner_id") or "")
+    owner = session.get(Character, owner_id) or session.get(Location, owner_id)
+    if owner is not None:
+        owner.status = "PENDING_CONFIRM"
+        session.add(owner)
+        session.commit()
+    return {"ok": True, "asset_id": asset_id, "media_url": asset_media_url(project_id, restored)}
 
 
 @router.post("/assets/link-shots")
@@ -229,6 +315,82 @@ def update_character(
     }
 
 
+@router.post("/characters/{character_id}/revise-setting")
+async def revise_character_setting(
+    project_id: str,
+    character_id: str,
+    body: CharacterRevisionIn,
+    session: Session = Depends(project_session),
+):
+    """按自然语言意见修改角色文字设定，并立即按新设定重生成参考图。"""
+    feedback = body.feedback.strip()
+    if not feedback:
+        raise HTTPException(status_code=422, detail="请填写角色设定的修改意见")
+    character = _get_character(session, project_id, character_id)
+    project = session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    compliance_gate.check_or_raise(feedback, "character.revise-setting", project_id)
+    system = (
+        "你是影视角色设定编辑。根据用户意见修改当前角色卡，只修改意见涉及的内容，"
+        "未被点名的身份、外形和剧情信息必须保持不变。不要生成图片提示词。"
+        "输出严格JSON，字段必须完整：name、age_range、gender、role、description、"
+        "appearance、costume、personality、visual_anchors、immutable_traits。"
+        "visual_anchors和immutable_traits必须是字符串数组，role只能是PRIMARY或SUPPORTING。"
+    )
+    current = {
+        "name": character.name,
+        "age_range": character.age_range or "",
+        "gender": character.gender or "",
+        "role": character.role,
+        "description": character.description,
+        "appearance": character.appearance,
+        "costume": character.costume,
+        "personality": character.personality,
+        "visual_anchors": character.visual_anchors,
+        "immutable_traits": character.immutable_traits,
+    }
+    result = extract_json(
+        await get_text_model().complete(
+            system,
+            f"影片名称：{project.name}\n影片主题：{project.idea or project.name}\n"
+            f"当前角色卡：{current}\n用户修改意见：{feedback}",
+        )
+    )
+    for key in (
+        "name", "age_range", "gender", "role", "description", "appearance",
+        "costume", "personality", "visual_anchors", "immutable_traits",
+    ):
+        if key in result and result[key] is not None:
+            setattr(character, key, result[key])
+    if character.role not in ("PRIMARY", "SUPPORTING"):
+        character.role = current["role"]
+    character.visual_anchors = [str(item).strip() for item in character.visual_anchors if str(item).strip()]
+    character.immutable_traits = [str(item).strip() for item in character.immutable_traits if str(item).strip()]
+    # 文字设定已经变化，旧锁定提示词失效；保留参考图，交给用户决定是否重生成。
+    character.status = "PENDING_CONFIRM"
+    character.prompt_block = ""
+    character.prompt_block_hash = ""
+    character.version += 1
+    compliance_gate.check_or_raise(
+        "，".join(filter(None, [character.name, character.description, character.appearance])),
+        "character.revise-setting.result",
+        project_id,
+    )
+    session.add(character)
+    session.commit()
+    session.refresh(character)
+    image_prompt = await _contextual_character_prompt(project, character)
+    compliance_gate.check_or_raise(image_prompt, "character.turnaround", project_id)
+    job = enqueue_character_turnaround(session, project_id, character, image_prompt)
+    return {
+        **character.model_dump(),
+        "references": _refs(session, project_id, character.id),
+        "job": job.model_dump(),
+        "message": "角色设定已更新，参考图已进入独立生成队列",
+    }
+
+
 @router.delete("/characters/{character_id}", status_code=204)
 def delete_character(
     project_id: str,
@@ -257,10 +419,11 @@ async def _contextual_character_prompt(
     base = character_design_prompt(character)
     system = (
         "你是影视资产概念设计提示词编写师。请结合整部影片主题和当前资产设定，"
-        "为图片生成模型编写一条中文三视图基底提示词。必须明确主体是什么、时代与"
+        "为图片生成模型编写一条中文单人物参考图基底提示词。必须明确主体是什么、时代与"
         "世界观、材质、结构、比例、色彩、姿态和不可变特征；不得添加与剧情无关的"
-        "角色或环境。提示词供正面、侧面、背面三个视角共用，因此不要在基底提示词"
-        "中指定单一视角。输出严格JSON：{\"prompt\":\"...\"}。"
+        "角色或环境。基底提示词之后会分别用于正面、侧面、背面的独立单张生成，因此不要"
+        "写‘三视图’‘多视角’‘对照图’‘拼版’或暗示同一画面出现多个角色，也不要指定单一视角。"
+        "必须写明画面中恰好只有一个人物。输出严格JSON：{\"prompt\":\"...\"}。"
     )
     user = (
         f"影片名称：{project.name}\n"
@@ -274,12 +437,37 @@ async def _contextual_character_prompt(
         f"现有基础提示词：{base}\n"
         "如果该资产是特洛伊木马，必须写明它是古希腊战争中的巨型木制攻城木马雕像，"
         "由深色粗木板、木榫和加固铜件构成，四足全部稳定落地或固定在木制轮台上，"
-        "禁止真实马匹、禁止抬腿、禁止奔跑姿态，并要求三个视角结构完全一致。"
+        "禁止真实马匹、禁止抬腿、禁止奔跑姿态，并要求各张独立视角的结构保持一致。"
     )
     result = extract_json(await get_text_model().complete(system, user))
     prompt = str(result.get("prompt") or "").strip()
     if not prompt:
         raise HTTPException(status_code=502, detail="文本API没有返回资产生图提示词")
+    return prompt
+
+
+async def _contextual_location_prompt(project: Project, location: Location) -> str:
+    """由文本模型结合全片主题整理场景生图提示词。"""
+    base = location_design_prompt(location)
+    system = (
+        "你是影视场景概念设计提示词编写师。结合影片主题和场景设定，为图片模型编写"
+        "一条中文场景参考图基底提示词。必须明确时代、空间结构、材质、色彩、光线、"
+        "关键视觉锚点和固定元素。不要指定主角度或细节角度，系统会分别追加。"
+        "不得擅自增加当前场景设定之外的人物。输出严格JSON：{\"prompt\":\"...\"}。"
+    )
+    user = (
+        f"影片名称：{project.name}\n影片主题：{project.idea or project.name}\n"
+        f"场景名称：{location.name}\n场景描述：{location.description}\n"
+        f"视觉风格：{location.visual_style}\n默认时段：{location.time_of_day_default}\n"
+        f"材质：{'、'.join(location.materials or [])}\n色彩：{'、'.join(location.colors or [])}\n"
+        f"视觉锚点：{'、'.join(location.visual_cues or [])}\n"
+        f"固定元素：{'、'.join(location.immutable_elements or [])}\n"
+        f"光线规则：{'、'.join(location.lighting_rules or [])}\n现有基础提示词：{base}"
+    )
+    result = extract_json(await get_text_model().complete(system, user))
+    prompt = str(result.get("prompt") or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=502, detail="文本API没有返回场景生图提示词")
     return prompt
 
 
@@ -346,14 +534,38 @@ def lock_character_api(
     # 而 model_dump() 不走 SQLAlchemy 的加载描述符，过期后会静默返回 {}
     payload = locked.model_dump()
     link_shots_to_assets(session, project_id)
+    location_jobs = _enqueue_pending_locations_after_character_lock(session, project_id)
     return {
         **payload,
         "references": _refs(session, project_id, payload["id"]),
+        "location_jobs": [job.model_dump() for job in location_jobs],
+        "message": (
+            f"全部角色已确认，已自动提交 {len(location_jobs)} 个场景生成任务"
+            if location_jobs else "角色已确认"
+        ),
+    }
+
+
+@router.post("/locations/references/generate-pending", status_code=202)
+def generate_pending_location_refs(
+    project_id: str, session: Session = Depends(project_session)
+):
+    jobs = _enqueue_pending_locations_after_character_lock(session, project_id)
+    if not jobs:
+        characters = list(
+            session.exec(select(Character).where(Character.project_id == project_id))
+        )
+        if any(character.status != "LOCKED" for character in characters):
+            raise HTTPException(status_code=409, detail="仍有角色尚未确认锁定")
+    return {
+        "count": len(jobs),
+        "jobs": [job.model_dump() for job in jobs],
+        "message": "场景生成任务已提交" if jobs else "没有需要补交的场景任务",
     }
 
 
 @router.post("/locations", status_code=201)
-def create_location(
+async def create_location(
     project_id: str,
     body: LocationIn,
     session: Session = Depends(project_session),
@@ -389,7 +601,26 @@ def create_location(
     session.add(location)
     session.commit()
     session.refresh(location)
-    return {**location.model_dump(), "references": []}
+    # AUTO 场景创建后立即走“文本 API 编写生图提示词 → 图片任务入队”，
+    # 用户无需再手动点击一次生成参考图。IMPORT 仍保留纯上传工作流。
+    job = None
+    if body.source == "AUTO":
+        project = session.get(Project, project_id)
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+        try:
+            prompt = await _contextual_location_prompt(project, location)
+        except Exception:
+            # 文本模型偶发不可用时也不能让“创建成功”看起来像失败；使用完整场景卡兜底入队。
+            prompt = location_design_prompt(location)
+        compliance_gate.check_or_raise(prompt, "location.references.generate", project_id)
+        job = enqueue_location_refs(session, project_id, location, prompt)
+    return {
+        **location.model_dump(),
+        "references": [],
+        "job": job.model_dump() if job else None,
+        "message": "场景已创建，参考图生成任务已自动提交" if job else "场景已创建，请上传参考图",
+    }
 
 
 @router.patch("/locations/{location_id}")
@@ -417,6 +648,79 @@ def update_location(
     }
 
 
+@router.post("/locations/{location_id}/revise-setting")
+async def revise_location_setting(
+    project_id: str,
+    location_id: str,
+    body: LocationRevisionIn,
+    session: Session = Depends(project_session),
+):
+    """按自然语言意见修改场景设定，并按新设定重生成场景参考图。"""
+    feedback = body.feedback.strip()
+    if not feedback:
+        raise HTTPException(status_code=422, detail="请填写场景设定的修改意见")
+    location = _get_location(session, project_id, location_id)
+    project = session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    compliance_gate.check_or_raise(feedback, "location.revise-setting", project_id)
+    current = {
+        "name": location.name,
+        "description": location.description,
+        "visual_style": location.visual_style,
+        "time_of_day_default": location.time_of_day_default,
+        "materials": location.materials,
+        "colors": location.colors,
+        "visual_cues": location.visual_cues,
+        "immutable_elements": location.immutable_elements,
+        "lighting_rules": location.lighting_rules,
+    }
+    system = (
+        "你是影视场景设定编辑。根据用户意见修改当前场景卡，只修改意见涉及的内容，"
+        "未被点名的空间、时代、材质、色彩和剧情信息必须保持不变。输出严格JSON，"
+        "字段必须完整：name、description、visual_style、time_of_day_default、materials、"
+        "colors、visual_cues、immutable_elements、lighting_rules。后五项必须是字符串数组。"
+    )
+    result = extract_json(
+        await get_text_model().complete(
+            system,
+            f"影片名称：{project.name}\n影片主题：{project.idea or project.name}\n"
+            f"当前场景卡：{current}\n用户修改意见：{feedback}",
+        )
+    )
+    list_fields = {"materials", "colors", "visual_cues", "immutable_elements", "lighting_rules"}
+    for key in current:
+        value = result.get(key)
+        if value is None:
+            continue
+        if key in list_fields:
+            value = [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else current[key]
+        else:
+            value = str(value).strip()
+        setattr(location, key, value)
+    location.status = "PENDING_CONFIRM"
+    location.prompt_block = ""
+    location.prompt_block_hash = ""
+    location.version += 1
+    compliance_gate.check_or_raise(
+        "，".join(filter(None, [location.name, location.description, location.visual_style])),
+        "location.revise-setting.result",
+        project_id,
+    )
+    session.add(location)
+    session.commit()
+    session.refresh(location)
+    prompt = await _contextual_location_prompt(project, location)
+    compliance_gate.check_or_raise(prompt, "location.reference", project_id)
+    job = enqueue_location_refs(session, project_id, location, prompt)
+    return {
+        **location.model_dump(),
+        "references": _refs(session, project_id, location.id),
+        "job": job.model_dump(),
+        "message": "场景设定已更新，参考图已进入独立生成队列",
+    }
+
+
 @router.delete("/locations/{location_id}", status_code=204)
 def delete_location(
     project_id: str,
@@ -434,13 +738,16 @@ def delete_location(
 
 
 @router.post("/locations/{location_id}/references/generate", status_code=202)
-def generate_location_refs(
+async def generate_location_refs(
     project_id: str,
     location_id: str,
     session: Session = Depends(project_session),
 ):
     location = _get_location(session, project_id, location_id)
-    prompt = location_design_prompt(location)
+    project = session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="project not found")
+    prompt = await _contextual_location_prompt(project, location)
     compliance_gate.check_or_raise(prompt, "location.reference", project_id)
     job = enqueue_location_refs(session, project_id, location, prompt)
     return {"job": job.model_dump()}

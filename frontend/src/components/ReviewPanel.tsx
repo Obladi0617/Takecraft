@@ -7,7 +7,7 @@ import {
   submitScriptReview,
   submitAssetReview,
   submitStoryboardReview,
-  submitTakeReview,
+  submitSceneReview,
   selectStoryboard,
 } from '../api/client'
 import { useAppStore } from '../stores/app'
@@ -22,8 +22,10 @@ export default function ReviewPanel() {
   const projectId = useAppStore((s) => s.projectId)!
   const queryClient = useQueryClient()
   const [scriptFeedback, setScriptFeedback] = useState('')
+  const [scriptNotice, setScriptNotice] = useState('')
   const [assetFeedback, setAssetFeedback] = useState('')
   const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([])
+  const [assetNotice, setAssetNotice] = useState('')
   const [storyboardFeedback, setStoryboardFeedback] = useState('')
   const [shotFeedback, setShotFeedback] = useState<Record<string, string>>({})
   const [previewImage, setPreviewImage] = useState<{ url: string; alt: string } | null>(null)
@@ -33,6 +35,8 @@ export default function ReviewPanel() {
   const [submittingTakeIds, setSubmittingTakeIds] = useState<string[]>([])
   const [takeNotice, setTakeNotice] = useState('')
   const [takeReviewError, setTakeReviewError] = useState('')
+  const [approvedCharIds, setApprovedCharIds] = useState<Set<string>>(new Set())
+  const [approvedLocIds, setApprovedLocIds] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     if (!previewImage) return
@@ -69,21 +73,41 @@ export default function ReviewPanel() {
   const scriptReview = useMutation({
     mutationFn: (decision: 'APPROVE' | 'REVISE') =>
       submitScriptReview(projectId, decision, scriptFeedback),
-    onSuccess: () => {
+    onMutate: (decision) => {
+      setScriptNotice(
+        decision === 'APPROVE'
+          ? '已提交，等待系统确认并进入下一阶段…'
+          : '修改意见已提交，等待新剧本返回中…',
+      )
+    },
+    onSuccess: (_, decision) => {
+      setScriptNotice(
+        decision === 'APPROVE'
+          ? '审核指令已接收，正在进入下一阶段…'
+          : '修改指令已接收，正在重新生成剧本，请等待返回…',
+      )
       setScriptFeedback('')
       queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
       queryClient.invalidateQueries({ queryKey: ['pipeline', projectId] })
       queryClient.invalidateQueries({ queryKey: ['assets', projectId] })
       queryClient.invalidateQueries({ queryKey: ['jobs', projectId] })
     },
+    onError: () => {
+      setScriptNotice('')
+    },
   })
 
   const assetReview = useMutation({
     mutationFn: (decision: 'APPROVE' | 'REVISE') =>
       submitAssetReview(projectId, decision, assetFeedback, decision === 'REVISE' ? selectedAssetIds : []),
-    onSuccess: () => {
+    onSuccess: (_, decision) => {
+      if (decision === 'REVISE') {
+        setAssetNotice('指令已接收，所选图片正在独立重新生成。你可以继续勾选其他图片并提交新的修改指令。')
+      }
       setAssetFeedback('')
       setSelectedAssetIds([])
+      setApprovedCharIds(new Set())
+      setApprovedLocIds(new Set())
       queryClient.invalidateQueries({ queryKey: ['human-review', projectId] })
       queryClient.invalidateQueries({ queryKey: ['pipeline', projectId] })
       queryClient.invalidateQueries({ queryKey: ['assets', projectId] })
@@ -116,23 +140,19 @@ export default function ReviewPanel() {
     queryClient.invalidateQueries({ queryKey: ['jobs', projectId] })
   }
 
-  const submitOneTake = async (takeId: string, decision: 'APPROVE' | 'RETAKE') => {
-    setSubmittingTakeIds((ids) => ids.includes(takeId) ? ids : [...ids, takeId])
+  const submitOneScene = async (sceneId: string, decision: 'APPROVE' | 'RETAKE') => {
+    setSubmittingTakeIds((ids) => ids.includes(sceneId) ? ids : [...ids, sceneId])
     setTakeReviewError('')
     try {
-      await submitTakeReview(projectId, takeId, decision, takeFeedback[takeId] ?? '')
-      setTakeFeedback((current) => ({ ...current, [takeId]: '' }))
-      setSelectedTakeIds((ids) => ids.filter((id) => id !== takeId))
-      if (decision === 'RETAKE') {
-        setTakeNotice('指令已接收，重新生成中。你可以继续勾选其他 Take，并分别填写修改指令。')
-      }
+      await submitSceneReview(projectId, sceneId, decision, takeFeedback[sceneId] ?? '')
+      setTakeFeedback((current) => ({ ...current, [sceneId]: '' }))
+      setSelectedTakeIds((ids) => ids.filter((id) => id !== sceneId))
+      setTakeNotice(decision === 'RETAKE' ? '整场修改指令已提交，DGX 正按剧本总时长重新生成。' : '该场景已通过。')
       refreshTakeReview()
-      return true
     } catch (error) {
       setTakeReviewError(`提交失败：${String(error)}`)
-      return false
     } finally {
-      setSubmittingTakeIds((ids) => ids.filter((id) => id !== takeId))
+      setSubmittingTakeIds((ids) => ids.filter((id) => id !== sceneId))
     }
   }
 
@@ -151,6 +171,14 @@ export default function ReviewPanel() {
     return (
       <div className="review-panel">
         <h3>剧本审核</h3>
+        {scriptNotice && (
+          <div className="review-command-notice" role="status" aria-live="polite">
+            <span>{scriptReview.isPending ? '⏳' : '✓'} {scriptNotice}</span>
+            {!scriptReview.isPending && (
+              <button aria-label="关闭提示" onClick={() => setScriptNotice('')}>×</button>
+            )}
+          </div>
+        )}
         <div className="review-content">
           <div className="screenplay-preview">
             <h4>剧本内容</h4>
@@ -187,13 +215,17 @@ export default function ReviewPanel() {
                 disabled={scriptReview.isPending}
                 onClick={() => scriptReview.mutate('APPROVE')}
               >
-                通过剧本并继续
+                {scriptReview.isPending && scriptReview.variables === 'APPROVE'
+                  ? '已提交，等待返回中…'
+                  : '通过剧本并继续'}
               </button>
               <button
                 disabled={scriptReview.isPending || !scriptFeedback.trim()}
                 onClick={() => scriptReview.mutate('REVISE')}
               >
-                按意见修改剧本
+                {scriptReview.isPending && scriptReview.variables === 'REVISE'
+                  ? '已提交，等待返回中…'
+                  : '按意见修改剧本'}
               </button>
             </div>
             {scriptReview.isError && (
@@ -210,6 +242,12 @@ export default function ReviewPanel() {
     return (
       <div className="review-panel">
         <h3>资产审核</h3>
+        {assetNotice && (
+          <div className="review-command-notice" role="status">
+            <span>✓ {assetNotice}</span>
+            <button aria-label="关闭提示" onClick={() => setAssetNotice('')}>×</button>
+          </div>
+        )}
         <div className="review-content">
           <div className="assets-preview">
             <div className="characters-section">
@@ -228,6 +266,7 @@ export default function ReviewPanel() {
                     <p><strong>不可变特征：</strong>{char.immutable_traits.join('、')}</p>
                   )}
                   <span className={`badge ${char.status === 'LOCKED' ? 'ok' : ''}`}>{char.status}</span>
+                  {approvedCharIds.has(char.id) && <span className="badge ok">已审核通过</span>}
                   <div className="asset-refs review-asset-refs">
                     {(assetBundle?.characters.find((item) => item.id === char.id)?.references ?? []).map((ref) => (
                       <div key={ref.id} className={`asset-view selectable ${selectedAssetIds.includes(ref.id) ? 'selected' : ''}`}>
@@ -241,6 +280,9 @@ export default function ReviewPanel() {
                       </div>
                     ))}
                   </div>
+                  {!approvedCharIds.has(char.id) && (
+                    <button className="asset-approve-btn" onClick={() => setApprovedCharIds((prev) => new Set(prev).add(char.id))}>通过此角色</button>
+                  )}
                 </div>
               ))}
             </div>
@@ -266,6 +308,7 @@ export default function ReviewPanel() {
                       <p><strong>固定元素：</strong>{loc.immutable_elements.join('、')}</p>
                     )}
                     <span className={`badge ${loc.status === 'LOCKED' ? 'ok' : ''}`}>{loc.status}</span>
+                    {approvedLocIds.has(loc.id) && <span className="badge ok">已审核通过</span>}
                     <div className="asset-refs review-asset-refs">
                       {(assetBundle?.locations.find((item) => item.id === loc.id)?.references ?? [])
                         .filter((ref) => LOCATION_REVIEW_VIEWS.has(ref.view ?? ''))
@@ -281,6 +324,9 @@ export default function ReviewPanel() {
                           </div>
                         ))}
                     </div>
+                    {!approvedLocIds.has(loc.id) && (
+                      <button className="asset-approve-btn" onClick={() => setApprovedLocIds((prev) => new Set(prev).add(loc.id))}>通过此场景</button>
+                    )}
                   </div>
                 ))}
               </div>
@@ -295,14 +341,14 @@ export default function ReviewPanel() {
             <div className="action-buttons">
               <button
                 className="primary"
-                disabled={assetReview.isPending}
+                disabled={assetReview.isPending || approvedCharIds.size < humanReview.characters.length || approvedLocIds.size < (humanReview.locations?.length ?? 0)}
                 onClick={() => assetReview.mutate('APPROVE')}
               >
                 {assetReview.isPending
                   ? assetReview.variables === 'REVISE'
                     ? '已接收打回指令，重新生成中...'
                     : '正在通过资产...'
-                  : '通过资产并继续'}
+                  : `通过资产并继续（${approvedCharIds.size}/${humanReview.characters.length} 角色，${approvedLocIds.size}/${humanReview.locations?.length ?? 0} 场景已审核）`}
               </button>
               <button
                 disabled={assetReview.isPending || !assetFeedback.trim() || selectedAssetIds.length === 0}
@@ -349,7 +395,7 @@ export default function ReviewPanel() {
                     disabled={chooseStoryboard.isPending || sb.is_selected}
                     onClick={() => chooseStoryboard.mutate(sb.id)}
                   >
-                    {sb.is_selected ? '✓ 已选用于生成视频' : '选择这张用于生成视频'}
+                    {sb.is_selected ? '✓ 当前图片版本' : '回退并选用此图片版本'}
                   </button>
                   <button className="shot-detail-toggle" onClick={() => setExpandedShots((ids) => ids.includes(sb.id) ? ids.filter((id) => id !== sb.id) : [...ids, sb.id])}>
                     {expandedShots.includes(sb.id) ? '收起镜头文字' : '查看镜头文字'}
@@ -412,30 +458,21 @@ export default function ReviewPanel() {
     )
   }
 
-  // Take 人工复审：集中展示所有镜头，无需逐个进入镜头工作台。
+  // 场景人工复审：一个大场景就是一个生成、审核和回退版本。
   if (stage === 'HUMAN_TAKE_REVIEW') {
-    const latestTakes = (humanReview.takes ?? []).filter((take) => take.is_latest)
-    const selectedTakes = latestTakes.filter((take) => selectedTakeIds.includes(take.id) && !take.is_generating)
-    const invalidSelected = selectedTakes.filter((take) => !(takeFeedback[take.id] ?? '').trim())
-    const approvableTakes = latestTakes.filter((take) => (
-      !take.is_generating
-      && take.decision?.decision !== 'APPROVE'
-      && !submittingTakeIds.includes(take.id)
-    ))
+    const scenes = humanReview.scenes_review ?? []
+    const selectedScenes = scenes.filter((scene) => selectedTakeIds.includes(scene.id) && scene.status !== 'RUNNING' && scene.status !== 'PENDING')
+    const invalidSelected = selectedScenes.filter((scene) => !(takeFeedback[scene.id] ?? '').trim())
     const rejectSelected = async () => {
       if (invalidSelected.length > 0) {
-        setTakeReviewError(`请分别填写修改指令：${invalidSelected.map((take) => take.shot_title || take.shot_id).join('、')}`)
+        setTakeReviewError(`请分别填写修改指令：${invalidSelected.map((scene) => scene.title).join('、')}`)
         return
       }
-      await Promise.all(selectedTakes.map((take) => submitOneTake(take.id, 'RETAKE')))
-    }
-    const approveAll = async () => {
-      setTakeNotice('')
-      await Promise.all(approvableTakes.map((take) => submitOneTake(take.id, 'APPROVE')))
+      await Promise.all(selectedScenes.map((scene) => submitOneScene(scene.id, 'RETAKE')))
     }
     return (
       <div className="review-panel">
-        <h3>Take 人工复审</h3>
+        <h3>场景视频人工复审</h3>
         {takeNotice && (
           <div className="review-command-notice" role="status">
             <span>✓ {takeNotice}</span>
@@ -443,63 +480,62 @@ export default function ReviewPanel() {
           </div>
         )}
         <p className="review-explainer">
-          已生成的 Take 可以随时审核。勾选不满意的视频，并在各自卡片中填写独立修改指令；
-          一条重生成时仍可继续打回其他条。全部镜头通过后才会进入剪辑。
+          01–06 每个大场景只生成和审核一条完整视频。时长由剧本内镜头时长相加，
+          小镜头只用于文本 API 编排动作与节奏，不再单独展示或单独提交 DGX。
         </p>
         <div className="take-review-grid">
-          {latestTakes.map((take) => (
-            <div key={take.id} className={`take-review-card ${take.decision?.decision === 'APPROVE' ? 'approved' : ''} ${selectedTakeIds.includes(take.id) ? 'selected' : ''}`}>
+          {scenes.map((scene) => {
+            const generating = scene.status === 'RUNNING' || scene.status === 'PENDING'
+            return (
+            <div key={scene.id} className={`take-review-card ${scene.decision?.decision === 'APPROVE' ? 'approved' : ''} ${selectedTakeIds.includes(scene.id) ? 'selected' : ''}`}>
               <div className="take-review-heading">
-                <strong>{take.shot_title || take.shot_id}</strong>
-                <span>{take.duration?.toFixed(1) ?? '-'} 秒</span>
-                {take.decision?.decision === 'APPROVE' && <span className="badge ok">已人工通过</span>}
-                {take.is_generating && <span className="badge generating">重新生成中</span>}
+                <strong>{String(scene.index).padStart(2, '0')} {scene.title}</strong>
+                <span>{scene.duration.toFixed(1)} 秒 · {scene.shot_count} 个剧本镜头</span>
+                {scene.decision?.decision === 'APPROVE' && <span className="badge ok">已人工通过</span>}
+                {generating && <span className="badge generating">DGX 整场生成中</span>}
                 <label className="take-reject-check">
                   <input
                     type="checkbox"
-                    checked={selectedTakeIds.includes(take.id)}
-                    disabled={take.is_generating || submittingTakeIds.includes(take.id)}
-                    onChange={() => setSelectedTakeIds((ids) => ids.includes(take.id) ? ids.filter((id) => id !== take.id) : [...ids, take.id])}
+                    checked={selectedTakeIds.includes(scene.id)}
+                    disabled={generating || submittingTakeIds.includes(scene.id)}
+                    onChange={() => setSelectedTakeIds((ids) => ids.includes(scene.id) ? ids.filter((id) => id !== scene.id) : [...ids, scene.id])}
                   />
                   勾选打回
                 </label>
               </div>
-              <video src={`${API_BASE}${take.media_url}`} controls preload="metadata" />
+              {scene.media_url
+                ? <video src={`${API_BASE}${scene.media_url}`} controls preload="metadata" />
+                : <div className="video-placeholder">{generating ? '整场视频生成中…' : '尚无完整场景视频，请重新生成此场景'}</div>}
               <details>
-                <summary>查看镜头文字与视频提示词</summary>
-                <p><strong>画面内容：</strong>{take.shot_description}</p>
-                <p><strong>视频提示词：</strong>{take.prompt}</p>
+                <summary>查看剧本镜头与整场视频提示词</summary>
+                <p><strong>内部镜头：</strong>{scene.shot_titles.join(' → ')}</p>
+                <p><strong>视频提示词：</strong>{scene.prompt}</p>
               </details>
               <textarea
-                placeholder="为这一条单独填写修改指令，例如：动作太快、主体偏离画面、雷电太弱"
-                value={takeFeedback[take.id] ?? ''}
-                disabled={take.is_generating || submittingTakeIds.includes(take.id)}
-                onChange={(event) => setTakeFeedback((current) => ({ ...current, [take.id]: event.target.value }))}
+                placeholder="填写整场修改指令，文本 API 会结合剧本、人物、场景和镜头要求重写提示词"
+                value={takeFeedback[scene.id] ?? ''}
+                disabled={generating || submittingTakeIds.includes(scene.id)}
+                onChange={(event) => setTakeFeedback((current) => ({ ...current, [scene.id]: event.target.value }))}
               />
               <div className="action-buttons">
                 <button
-                  className={take.decision?.decision === 'APPROVE' ? 'primary' : ''}
-                  disabled={take.is_generating || submittingTakeIds.includes(take.id) || take.decision?.decision === 'APPROVE'}
-                  onClick={() => submitOneTake(take.id, 'APPROVE')}
-                >{submittingTakeIds.includes(take.id) ? '提交中...' : take.decision?.decision === 'APPROVE' ? '✓ 已通过' : '通过这一条'}</button>
+                  className={scene.decision?.decision === 'APPROVE' ? 'primary' : ''}
+                  disabled={generating || submittingTakeIds.includes(scene.id) || !scene.media_url || scene.decision?.decision === 'APPROVE'}
+                  onClick={() => submitOneScene(scene.id, 'APPROVE')}
+                >{submittingTakeIds.includes(scene.id) ? '提交中...' : scene.decision?.decision === 'APPROVE' ? '✓ 已通过' : '通过此场景'}</button>
               </div>
-              {take.decision?.feedback && <p className="muted">上次意见：{take.decision.feedback}</p>}
+              {scene.decision?.feedback && <p className="muted">上次意见：{scene.decision.feedback}</p>}
             </div>
-          ))}
-          {latestTakes.length === 0 && <p className="muted">Take 正在生成，完成后会自动显示在这里。</p>}
+          )})}
+          {scenes.length === 0 && <p className="muted">场景视频正在生成，完成后会自动显示在这里。</p>}
         </div>
         {takeReviewError && <p className="error">{takeReviewError}</p>}
         <div className="take-review-footer">
-          <span className="muted">已勾选 {selectedTakes.length} 条；每条使用各自的修改指令</span>
+          <span className="muted">已勾选 {selectedScenes.length} 个完整场景</span>
           <button
-            disabled={selectedTakes.length === 0 || selectedTakes.some((take) => submittingTakeIds.includes(take.id))}
+            disabled={selectedScenes.length === 0 || selectedScenes.some((scene) => submittingTakeIds.includes(scene.id))}
             onClick={rejectSelected}
-          >打回已勾选（{selectedTakes.length}）</button>
-          <button
-            className="primary"
-            disabled={approvableTakes.length === 0}
-            onClick={approveAll}
-          >全部通过当前已生成（{approvableTakes.length}）</button>
+          >整场打回（{selectedScenes.length}）</button>
         </div>
       </div>
     )

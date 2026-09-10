@@ -24,6 +24,11 @@ REVISE_VIDEO_PROMPT_SYSTEM = """你是视频生成提示词导演。结合剧本
 上一版视频提示词和人工复审意见，重写仅用于该镜头重拍的视频生成提示词。必须具体落实人工指出的
 问题，同时保留角色/场景一致性与镜头叙事意图。输出 {"prompt":"..."}，中文，只输出 JSON。"""
 
+SCENE_VIDEO_PROMPT_SYSTEM = """你是 MiniMax H3 R2V 视频导演。为一个大场景内的全部镜头写一条完整、细致、可直接生成视频的中文提示词。
+必须把整体故事背景、导演视觉规范、场景资产、角色资产和各镜头要求融为一体；按输入顺序列出绝对时间段，时间连续且总时长准确，每段明确主体动作、表演、景别、机位、运镜、光线、环境动态和声音。
+这是参考图生视频：参考图只用于锁定人物身份、服装、场景结构、道具和美术风格，不得把参考图描述成首帧或尾帧。大场景内部允许自然切镜，但不得引入其他大场景，不得擅自新增人物、改变服装或场景结构。
+提示词应充分具体，通常 800 至 1600 个汉字；强调人物与场景一致性、清晰稳定的动作、自然物理运动、电影级构图。不要解释，不要 Markdown，只输出 {"prompt":"..."} JSON。"""
+
 BIBLE_SYSTEM = """你是导演。基于剧本输出导演圣经 JSON，结构：
 {"visual_style": "...", "color_rules": ["..."], "camera_rules": ["..."],
 "performance_rules": ["..."], "lighting_rules": ["..."], "editing_rules": ["..."]}
@@ -134,6 +139,30 @@ async def revise_video_prompt(
         f"镜头：{json.dumps(shot, ensure_ascii=False)}\n"
         f"已锁定分镜：{storyboard_prompt}\n上一版提示词：{previous_prompt}\n"
         f"人工复审意见：{feedback}",
+        ("prompt",),
+    )
+    return str(result["prompt"])
+
+
+async def prompt_scene_video(
+    model: TextModel,
+    screenplay: dict,
+    bible: dict,
+    scene: dict,
+    shots: list[dict],
+    characters: list[dict],
+    locations: list[dict],
+) -> str:
+    total = sum(max(float(shot.get("duration", 1.0)), 1.0) for shot in shots)
+    result = await _ask_json(
+        model,
+        SCENE_VIDEO_PROMPT_SYSTEM,
+        f"完整剧本与整体背景：{json.dumps(screenplay, ensure_ascii=False)}\n"
+        f"导演圣经：{json.dumps(bible, ensure_ascii=False)}\n"
+        f"当前大场景：{json.dumps(scene, ensure_ascii=False)}\n"
+        f"锁定角色设定：{json.dumps(characters, ensure_ascii=False)}\n"
+        f"锁定场景设定：{json.dumps(locations, ensure_ascii=False)}\n"
+        f"按顺序生成的镜头（总时长 {total:.2f} 秒）：{json.dumps(shots, ensure_ascii=False)}",
         ("prompt",),
     )
     return str(result["prompt"])

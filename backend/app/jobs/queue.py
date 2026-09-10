@@ -1,7 +1,9 @@
 import asyncio
 import shutil
+from collections import deque
 from pathlib import Path
 
+from PIL import Image, ImageFilter
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
@@ -17,8 +19,55 @@ PRIORITY_RANK = {"CRITICAL": 0, "HIGH": 1, "NORMAL": 2, "LOW": 3}
 POLL_INTERVAL = 2.0
 ADAPTER_POLL_INTERVAL = 0.5
 MAX_RETRY = 1
+CHARACTER_VIEW_ATTEMPTS = 3
 # max(index)+1 在并发下会撞主键，撞了就重算
 ID_ATTEMPTS = 3
+
+
+def _large_foreground_components(path: str) -> int:
+    """估算纯色角色设定图中的大型独立主体数，用于拦截双人拼版。"""
+    with Image.open(path) as source:
+        image = source.convert("RGB")
+        image.thumbnail((192, 256))
+        width, height = image.size
+        pixels = image.load()
+        corners = [pixels[0, 0], pixels[width - 1, 0], pixels[0, height - 1], pixels[width - 1, height - 1]]
+        background = tuple(sum(color[channel] for color in corners) // len(corners) for channel in range(3))
+        mask = Image.new("L", image.size)
+        mask.putdata([
+            255 if sum(abs(pixel[channel] - background[channel]) for channel in range(3)) > 72 else 0
+            for pixel in image.getdata()
+        ])
+        # 连起人物内部被浅色衣物切开的细小缝隙，但不跨越两个角色之间的大间距。
+        mask = mask.filter(ImageFilter.MaxFilter(3))
+        data = mask.load()
+        visited = bytearray(width * height)
+        minimum_area = max(int(width * height * 0.025), 80)
+        minimum_height = max(int(height * 0.28), 24)
+        large = 0
+        for y in range(height):
+            for x in range(width):
+                index = y * width + x
+                if visited[index] or not data[x, y]:
+                    continue
+                queue = deque([(x, y)])
+                visited[index] = 1
+                area = 0
+                min_y = max_y = y
+                while queue:
+                    px, py = queue.popleft()
+                    area += 1
+                    min_y = min(min_y, py)
+                    max_y = max(max_y, py)
+                    for nx, ny in ((px - 1, py), (px + 1, py), (px, py - 1), (px, py + 1)):
+                        if 0 <= nx < width and 0 <= ny < height:
+                            next_index = ny * width + nx
+                            if not visited[next_index] and data[nx, ny]:
+                                visited[next_index] = 1
+                                queue.append((nx, ny))
+                if area >= minimum_area and max_y - min_y + 1 >= minimum_height:
+                    large += 1
+        return large
 
 
 class GenerationQueue:
@@ -38,7 +87,45 @@ class GenerationQueue:
         self._image_sem = asyncio.Semaphore(settings.image_generation_concurrency)
         self._video_sem = asyncio.Semaphore(settings.video_generation_concurrency)
         self._review_sem = asyncio.Semaphore(settings.review_concurrency)
+        self._recover_interrupted_asset_jobs()
         self._poll_task = asyncio.create_task(self._poll_loop())
+
+    def _recover_interrupted_asset_jobs(self) -> None:
+        """接管上次进程被中断的资产任务，并从尚未完成的视角继续。
+
+        三视图是逐张生成和落库的。进程若在第二、第三张之间退出，数据库会
+        留下 RUNNING；新进程必须将它恢复为 PENDING，否则界面会永久显示生成中。
+        completed_views 用作逐张检查点，保证恢复后不会重算已经完成的视角。
+        """
+        for project_id in self._active_projects():
+            with Session(get_engine(project_id)) as session:
+                jobs = list(
+                    session.exec(
+                        select(GenerationJob).where(
+                            GenerationJob.project_id == project_id,
+                            GenerationJob.job_type.in_(["CHARACTER", "LOCATION"]),  # type: ignore[arg-type]
+                            GenerationJob.status == "RUNNING",
+                        )
+                    )
+                )
+                for job in jobs:
+                    desired_views = list((job.payload or {}).get("views") or [])
+                    result = dict(job.result or {})
+                    completed = list(result.get("completed_views") or [])
+                    # 兼容旧任务：旧版本尚未写检查点时，以已落库的视角作为恢复起点。
+                    if not completed:
+                        owner_id = str((job.payload or {}).get("owner_id") or "")
+                        completed = [
+                            view for view in desired_views
+                            if session.get(Asset, f"{owner_id}_{view}") is not None
+                        ]
+                    result["completed_views"] = completed
+                    result["recovered_after_restart"] = True
+                    job.result = result
+                    job.status = "DONE" if all(view in completed for view in desired_views) else "PENDING"
+                    job.error = None
+                    session.add(job)
+                session.commit()
 
     async def stop(self) -> None:
         self._running = False
@@ -233,22 +320,45 @@ class GenerationQueue:
         subdir = CHARACTER_SUBDIR if is_character else LOCATION_SUBDIR
         asset_type = CHARACTER_ASSET_TYPE if is_character else LOCATION_ASSET_TYPE
         generator = get_image_generator(job.project_id, subdir)
+        validate_single_human = bool(
+            is_character
+            and isinstance(owner, Character)
+            and owner.gender not in {"其他", "非人", "无"}
+        )
 
         asset_ids: list[str] = []
-        generated_views: list[str] = []
+        checkpoint = dict(job.result or {})
+        generated_views: list[str] = list(checkpoint.get("completed_views") or [])
         for view in views:
-            request = ImageGenerationRequest(
-                prompt=view_prompt(base_prompt, view),
-                count=1,
-                width=int(payload.get("width", 1024)),
-                height=int(payload.get("height", 576)),
-                seed=owner.seed,
-                references=[str(path) for path in payload.get("references") or []],
-            )
-            images = await generator.generate(request)
-            if not images:
-                raise RuntimeError(f"{view} 未产出图像")
-            image = images[0]
+            if view in generated_views:
+                continue
+            image = None
+            attempts = CHARACTER_VIEW_ATTEMPTS if is_character else 1
+            for attempt in range(attempts):
+                request = ImageGenerationRequest(
+                    prompt=view_prompt(base_prompt, view),
+                    negative_prompt=(
+                        "two people, multiple people, duplicate person, cloned person, mirrored person, "
+                        "character sheet, turnaround sheet, multiple views, split screen, collage, grid, panels"
+                        if is_character else None
+                    ),
+                    count=1,
+                    width=int(payload.get("width", 1024)),
+                    height=int(payload.get("height", 576)),
+                    seed=(owner.seed + attempt * 7919) if owner.seed is not None else None,
+                    references=[str(path) for path in payload.get("references") or []],
+                )
+                images = await generator.generate(request)
+                if not images:
+                    continue
+                candidate = images[0]
+                if validate_single_human and _large_foreground_components(candidate.path) >= 2:
+                    Path(candidate.path).unlink(missing_ok=True)
+                    continue
+                image = candidate
+                break
+            if image is None:
+                raise RuntimeError(f"{view} 连续 {attempts} 次检测到多人物或未产出图像，已拒绝写入")
             asset = store_generated_asset(
                 session,
                 job.project_id,
@@ -261,6 +371,12 @@ class GenerationQueue:
             )
             asset_ids.append(asset.id)
             generated_views.append(view)
+            # 每完成一张就持久化检查点。即使进程此刻重启，下一次也只补剩余视角。
+            checkpoint["completed_views"] = list(generated_views)
+            checkpoint["asset_ids"] = list(dict.fromkeys([*(checkpoint.get("asset_ids") or []), *asset_ids]))
+            job.result = dict(checkpoint)
+            session.add(job)
+            session.commit()
 
         # 重新生成参考图即视为设定有变：LOCKED 也要退回待确认，
         # 否则 api 层的 _assert_editable 会永久 409，编辑入口不可达
@@ -268,25 +384,118 @@ class GenerationQueue:
             owner.status = "PENDING_CONFIRM"
             session.add(owner)
         session.commit()
-        return {"asset_ids": asset_ids, "views": generated_views}
+        return {
+            "asset_ids": list(dict.fromkeys([*(checkpoint.get("asset_ids") or []), *asset_ids])),
+            "views": generated_views,
+            "completed_views": generated_views,
+        }
 
     async def _do_video(self, session: Session, job: GenerationJob) -> dict:
         from ..services.assets import shot_asset_blocks
+        import logging
+        logger = logging.getLogger(__name__)
 
         payload = job.payload
+        if payload.get("mode") == "scene_r2v":
+            shot_ids = list(payload.get("shot_ids") or [])
+            shots = [session.get(Shot, shot_id) for shot_id in shot_ids]
+            if not shots or any(shot is None for shot in shots):
+                raise RuntimeError("场景 R2V 任务包含不存在的镜头")
+            prompt = str(payload.get("prompt") or "")
+            references = [str(path) for path in payload.get("references") or [] if Path(path).is_file()]
+            target_duration = sum(max(float(shot.duration_target), 1.0) for shot in shots if shot)
+            logger.info("[VIDEO_R2V] scene=%s shots=%s references=%s duration=%.2f",
+                        payload.get("scene_id"), shot_ids, len(references), target_duration)
+            request = VideoGenerationRequest(
+                shot_id=shot_ids[0], prompt=prompt, duration=target_duration,
+                first_frame=None, last_frame=None, reference_images=references,
+            )
+            generator = get_video_generator(job.project_id)
+            adapter_job_id = await generator.submit(request)
+            job.result = {"adapter_job_id": adapter_job_id, "shot_ids": shot_ids}
+            session.add(job)
+            session.commit()
+            while True:
+                status = await generator.status(adapter_job_id)
+                if status == "DONE":
+                    break
+                if status in ("FAILED", "CANCELLED", "UNKNOWN"):
+                    raise RuntimeError(f"场景 R2V 视频生成失败: {status}")
+                await asyncio.sleep(ADAPTER_POLL_INTERVAL)
+            video = await generator.result(adapter_job_id)
+            staged = abs_path(job.project_id, f"takes/_staging/{job.id}_scene.mp4")
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(video.path, staged)
+            from ..media.ffmpeg import extract_segment
+            actual_duration = probe_duration(staged)
+            if actual_duration is None or actual_duration < target_duration - 0.20:
+                raise RuntimeError(
+                    "场景视频时长不足，拒绝切分空白Take："
+                    f"实际 {actual_duration or 0:.2f}s / 需要 {target_duration:.2f}s"
+                )
+            # Keep the complete scene render as the user-facing review/version
+            # asset. Shot segments remain internal metadata for editing only.
+            scene_rel = f"takes/scenes/{payload.get('scene_id')}/{job.id}.mp4"
+            scene_dest = abs_path(job.project_id, scene_rel)
+            scene_dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(staged, scene_dest)
+            scene_proxy_rel = f"proxies/scenes/{payload.get('scene_id')}/{job.id}.mp4"
+            scene_proxy = make_proxy(staged, abs_path(job.project_id, scene_proxy_rel))
+            take_ids: list[str] = []
+            offset = 0.0
+            try:
+                for shot in shots:
+                    assert shot is not None
+                    segment_duration = max(float(shot.duration_target), 1.0)
+                    segment = abs_path(job.project_id, f"takes/_staging/{job.id}_{shot.id}.mp4")
+                    if not await asyncio.to_thread(extract_segment, staged, segment, offset, segment_duration):
+                        raise RuntimeError(f"场景视频切分失败: {shot.title}")
+                    take: Take | None = None
+                    for _ in range(ID_ATTEMPTS):
+                        index, take_id = next_seq_and_id(session, Take, job.project_id, "take")
+                        rel = f"takes/{shot.id}/{take_id}.mp4"
+                        proxy_rel = f"proxies/{take_id}.mp4"
+                        proxy = make_proxy(segment, abs_path(job.project_id, proxy_rel))
+                        take = Take(id=take_id, project_id=job.project_id, shot_id=shot.id,
+                            index=index, generation_job_id=job.id, prompt=prompt,
+                            model=video.model, seed=video.seed, original_path=rel,
+                            proxy_path=proxy_rel if proxy else None, duration=segment_duration,
+                            parameters={"mode": "scene_r2v", "scene_id": payload.get("scene_id"),
+                                        "segment_start": offset, "segment_duration": segment_duration},
+                            reference_images=references)
+                        session.add(take)
+                        try:
+                            session.commit()
+                            break
+                        except IntegrityError:
+                            session.rollback()
+                            abs_path(job.project_id, proxy_rel).unlink(missing_ok=True)
+                            take = None
+                    if take is None:
+                        raise RuntimeError("take id 分配连续冲突")
+                    dest = abs_path(job.project_id, rel)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(segment, dest)
+                    take_ids.append(take.id)
+                    offset += segment_duration
+            finally:
+                staged.unlink(missing_ok=True)
+            return {"take_ids": take_ids, "shot_ids": shot_ids,
+                    "adapter_job_id": adapter_job_id, "mode": "scene_r2v",
+                    "scene_id": payload.get("scene_id"),
+                    "scene_media_path": scene_proxy_rel if scene_proxy else scene_rel,
+                    "duration": actual_duration}
+
         shot = session.get(Shot, payload["shot_id"])
         if shot is None:
             raise RuntimeError(f"Shot 不存在: {payload['shot_id']}")
         prompt = payload.get("prompt") or shot.description or shot.title
-        first_frame = payload.get("first_frame")
-        if not first_frame and shot.storyboard_id:
-            sb = session.get(Storyboard, shot.storyboard_id)
-            if sb is not None:
-                first_frame = str(abs_path(job.project_id, sb.image_path))
+        # R2V only: storyboard images are references, never implicit first frames.
+        first_frame = None
         asset_refs = shot_asset_blocks(session, job.project_id, shot)["reference_images"]
-        reference_images = ([first_frame] if first_frame else []) + [
-            ref for ref in asset_refs if ref != first_frame
-        ]
+        logger.info(f"[VIDEO] shot={shot.id} first_frame={first_frame} asset_refs={len(asset_refs)} asset_refs_paths={asset_refs[:3]}")
+        reference_images = [str(path) for path in (payload.get("references") or asset_refs)]
+        logger.info(f"[VIDEO] reference_images total={len(reference_images)}")
         request = VideoGenerationRequest(
             shot_id=shot.id,
             prompt=prompt,

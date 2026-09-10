@@ -142,6 +142,7 @@ export interface AssetReference {
   created_at: string
   view: string | null
   media_url: string
+  versions?: Array<{ id: string; path: string; media_url: string; created_at?: string; source?: string }>
 }
 
 export type AssetStatus = 'DRAFT' | 'PENDING_CONFIRM' | 'LOCKED'
@@ -321,6 +322,20 @@ export interface HumanReviewState {
     is_latest: boolean
     is_selected: boolean
     is_generating: boolean
+    decision: HumanDecision | null
+  }>
+  scenes_review: Array<{
+    id: string
+    index: number
+    title: string
+    description: string
+    duration: number
+    shot_count: number
+    shot_titles: string[]
+    job_id: string | null
+    status: string | null
+    prompt: string
+    media_url: string | null
     decision: HumanDecision | null
   }>
   take_decisions: Record<string, HumanDecision>

@@ -102,6 +102,19 @@ def trim_to_duration(src: Path, dst: Path, duration: float) -> Path | None:
     return dst if result.returncode == 0 and dst.is_file() else None
 
 
+def extract_segment(src: Path, dst: Path, start: float, duration: float) -> Path | None:
+    """Extract an exact reviewable Take from a scene-level generated video."""
+    if not FFMPEG or not src.is_file() or start < 0 or duration <= 0:
+        return None
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [FFMPEG, "-y", "-ss", f"{start:.3f}", "-i", str(src), "-t", f"{duration:.3f}",
+         "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-c:a", "aac",
+         "-movflags", "+faststart", str(dst)], capture_output=True, text=True,
+    )
+    return dst if result.returncode == 0 and dst.is_file() else None
+
+
 def extract_tail_frame(src: Path, dst: Path, offset: float = 0.12) -> Path | None:
     """提取片尾前的清晰帧，供同场景下一镜作为首帧。"""
     if not FFMPEG or not src.is_file():

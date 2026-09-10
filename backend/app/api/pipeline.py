@@ -16,7 +16,13 @@ from ..domain.location import LOCATION_REF_KINDS
 from ..jobs import generation_queue
 from ..graph.film_graph import resume_film_pipeline, run_film_pipeline
 from ..repositories import next_seq_and_id
-from ..services.generation import record_artifact
+from ..services.generation import enqueue_scene_video_job, record_artifact
+from ..services.assets import (
+    character_design_prompt,
+    character_reference_sheets,
+    enqueue_asset_job,
+    location_design_prompt,
+)
 
 router = APIRouter(prefix="/api/v1/projects/{project_id}", tags=["pipeline"])
 
@@ -317,6 +323,38 @@ def human_review_state(
                 "is_generating": shot.id in generating_shot_ids,
                 "decision": take_decisions.get(take.id),
             })
+    scenes_review = []
+    from ..domain import Scene
+    for scene in session.exec(
+        select(Scene).where(Scene.project_id == project_id).order_by(Scene.index)
+    ):
+        scene_shots = list(session.exec(
+            select(Shot).where(Shot.project_id == project_id, Shot.scene_id == scene.id).order_by(Shot.index)
+        ))
+        scene_jobs = list(session.exec(
+            select(GenerationJob).where(
+                GenerationJob.project_id == project_id,
+                GenerationJob.job_type == "VIDEO",
+            ).order_by(GenerationJob.index.desc())
+        ))
+        latest_scene_job = next((j for j in scene_jobs if (j.payload or {}).get("mode") == "scene_r2v" and (j.payload or {}).get("scene_id") == scene.id), None)
+        result = (latest_scene_job.result or {}) if latest_scene_job else {}
+        media_path = str(result.get("scene_media_path") or "").replace('\\', '/')
+        scene_decision = _latest_artifact(session, project_id, "human_scene_review", scene.id)
+        scenes_review.append({
+            "id": scene.id,
+            "index": scene.index,
+            "title": scene.title,
+            "description": scene.description,
+            "duration": sum(max(float(s.duration_target), 1.0) for s in scene_shots),
+            "shot_count": len(scene_shots),
+            "shot_titles": [s.title for s in scene_shots],
+            "job_id": latest_scene_job.id if latest_scene_job else None,
+            "status": latest_scene_job.status if latest_scene_job else None,
+            "prompt": str((latest_scene_job.payload or {}).get("prompt") or "") if latest_scene_job else "",
+            "media_url": f"/media/{project_id}/{media_path}" if media_path else None,
+            "decision": scene_decision.data if scene_decision else None,
+        })
     return {
         "stage": project.status,
         "screenplay_id": screenplay.id if screenplay else None,
@@ -331,6 +369,7 @@ def human_review_state(
         "storyboard_decisions": sb_decisions,
         "storyboards": storyboards,
         "takes": takes,
+        "scenes_review": scenes_review,
         "take_decisions": take_decisions,
     }
 
@@ -384,7 +423,81 @@ def submit_asset_review(
         invalid = [asset_id for asset_id in target_asset_ids if asset_id not in valid_ids]
         if invalid:
             raise HTTPException(status_code=422, detail=f"资产图片不存在: {', '.join(invalid)}")
+    if decision == "REVISE":
+        active_jobs = list(
+            session.exec(
+                select(GenerationJob).where(
+                    GenerationJob.project_id == project_id,
+                    GenerationJob.job_type.in_(["CHARACTER", "LOCATION"]),  # type: ignore[arg-type]
+                    GenerationJob.status.in_(ACTIVE_STATUSES),  # type: ignore[arg-type]
+                )
+            )
+        )
+        active_targets = {
+            (str(job.payload.get("owner_id") or ""), view)
+            for job in active_jobs
+            for view in (job.payload.get("views") or [])
+        }
+        jobs: list[GenerationJob] = []
+        for asset_id in target_asset_ids:
+            asset = session.get(Asset, asset_id)
+            if asset is None:
+                continue
+            owner_id = str(asset.meta.get("owner_id") or "")
+            view = str(asset.meta.get("view") or "")
+            if (owner_id, view) in active_targets:
+                raise HTTPException(status_code=409, detail=f"{asset_id} 已在重新生成")
+            character = session.get(Character, owner_id)
+            location = session.get(Location, owner_id)
+            if character is not None:
+                character.status = "PENDING_CONFIRM"
+                session.add(character)
+                prompt = f"{character_design_prompt(character)}。人工返修意见：{body.feedback.strip()}"
+                jobs.append(enqueue_asset_job(
+                    session, project_id, owner_id, "CHARACTER", prompt, [view],
+                    width=768, height=1024,
+                ))
+            elif location is not None:
+                location.status = "PENDING_CONFIRM"
+                session.add(location)
+                prompt = f"{location_design_prompt(location)}。人工返修意见：{body.feedback.strip()}"
+                jobs.append(enqueue_asset_job(
+                    session, project_id, owner_id, "LOCATION", prompt, [view],
+                    references=character_reference_sheets(session, project_id),
+                ))
+        session.commit()
+        artifact = record_artifact(
+            session,
+            project_id,
+            "asset_rework_request",
+            "human",
+            {
+                "decision": decision,
+                "feedback": body.feedback.strip(),
+                "target_asset_ids": target_asset_ids,
+                "job_ids": [job.id for job in jobs],
+            },
+        )
+        return {
+            "ok": True,
+            "review_id": artifact.id,
+            "decision": decision,
+            "job_ids": [job.id for job in jobs],
+            "message": "指令已接收，所选图片已独立进入重新生成队列",
+        }
     if decision == "APPROVE":
+        active_asset_job = session.exec(
+            select(GenerationJob).where(
+                GenerationJob.project_id == project_id,
+                GenerationJob.job_type.in_(["CHARACTER", "LOCATION"]),  # type: ignore[arg-type]
+                GenerationJob.status.in_(ACTIVE_STATUSES),  # type: ignore[arg-type]
+            )
+        ).first()
+        if active_asset_job is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="仍有资产图片正在生成；可以继续打回其他图片，全部完成后再整体通过",
+            )
         refs = list(session.exec(select(Asset).where(Asset.project_id == project_id)))
         missing: list[str] = []
         owners_and_views = [
@@ -460,6 +573,80 @@ def submit_storyboard_review(
     return {"ok": True, "review_id": artifact.id, "decision": decision}
 
 
+@router.post("/scenes/{scene_id}/human-review", status_code=202)
+async def submit_scene_review(
+    project_id: str,
+    scene_id: str,
+    body: HumanReviewIn,
+    session: Session = Depends(project_session),
+):
+    """Review and regenerate one complete scene, never an individual shot."""
+    from ..domain import Scene
+    decision = body.decision.upper()
+    if decision not in {"APPROVE", "RETAKE"}:
+        raise HTTPException(status_code=422, detail="decision must be APPROVE or RETAKE")
+    if decision == "RETAKE" and not body.feedback.strip():
+        raise HTTPException(status_code=422, detail="打回场景时必须填写具体修改方向")
+    scene = session.get(Scene, scene_id)
+    if scene is None or scene.project_id != project_id:
+        raise HTTPException(status_code=404, detail="scene not found")
+    shots = list(session.exec(
+        select(Shot).where(Shot.project_id == project_id, Shot.scene_id == scene_id).order_by(Shot.index)
+    ))
+    if not shots:
+        raise HTTPException(status_code=409, detail="场景内没有剧本镜头")
+
+    review = record_artifact(session, project_id, "human_scene_review", "human", {
+        "decision": decision, "feedback": body.feedback.strip(),
+        "shot_ids": [shot.id for shot in shots],
+    }, scene_id)
+    if decision == "APPROVE":
+        for shot in shots:
+            latest = session.exec(
+                select(Take).where(Take.project_id == project_id, Take.shot_id == shot.id)
+                .order_by(Take.index.desc())
+            ).first()
+            if latest:
+                shot.selected_take_id = latest.id
+            shot.status = "HUMAN_APPROVED"
+            session.add(shot)
+        session.commit()
+        return {"ok": True, "review_id": review.id, "decision": decision}
+
+    shot_ids = [shot.id for shot in shots]
+    active = session.exec(select(GenerationJob).where(
+        GenerationJob.project_id == project_id,
+        GenerationJob.job_type == "VIDEO",
+        GenerationJob.shot_id.in_(shot_ids),  # type: ignore[arg-type]
+        GenerationJob.status.in_(ACTIVE_STATUSES),  # type: ignore[arg-type]
+    )).first()
+    if active:
+        raise HTTPException(status_code=409, detail=f"该场景已有生成任务: {active.id}")
+    previous_jobs = list(session.exec(
+        select(GenerationJob).where(
+            GenerationJob.project_id == project_id,
+            GenerationJob.job_type == "VIDEO",
+        ).order_by(GenerationJob.index.desc())
+    ))
+    previous = next((job for job in previous_jobs if (job.payload or {}).get("mode") == "scene_r2v" and (job.payload or {}).get("scene_id") == scene_id), None)
+    old_prompt = str((previous.payload or {}).get("prompt") or scene.description) if previous else scene.description
+    screenplay = _latest_artifact(session, project_id, "screenplay")
+    combined = "；".join(f"{shot.title}：{shot.description}" for shot in shots)
+    revised_prompt = await revise_video_prompt(get_text_model(), screenplay.data if screenplay else {}, {
+        "id": scene.id, "title": scene.title, "description": combined,
+        "duration": sum(max(float(shot.duration_target), 1.0) for shot in shots),
+        "framing": "MULTI_SHOT", "camera_motion": "SCRIPT_CONTROLLED",
+    }, old_prompt, old_prompt, body.feedback.strip())
+    compliance_gate.check_or_raise(revised_prompt, "scene.human_retake", project_id)
+    job = enqueue_scene_video_job(
+        session, project_id, scene_id, shot_ids, revised_prompt,
+        sum(max(float(shot.duration_target), 1.0) for shot in shots),
+        list((previous.payload or {}).get("references") or []) if previous else [],
+    )
+    return {"ok": True, "review_id": review.id, "decision": decision,
+            "job": _job_dict(job), "revised_prompt": revised_prompt}
+
+
 @router.post("/takes/{take_id}/human-review", status_code=202)
 async def submit_take_review(
     project_id: str,
@@ -530,8 +717,9 @@ async def submit_take_review(
         body.feedback.strip(),
     )
     compliance_gate.check_or_raise(prompt, "take.human_retake", project_id)
-    # Keep continuity on manual retakes too: every Take follows the previous
-    # project shot, including scene boundaries.
+    # Manual retakes obey the same continuity rule as normal generation:
+    # only inherit the previous Take tail inside the same scene.  A new scene
+    # starts from its own storyboard frame and is joined by a direct cut.
     first_frame: str | None = None
     ordered_shots = list(
         session.exec(
@@ -543,19 +731,20 @@ async def submit_take_review(
     position = next((i for i, item in enumerate(ordered_shots) if item.id == shot.id), -1)
     if position > 0:
         previous_shot = ordered_shots[position - 1]
-        previous_take = (
-            session.get(Take, previous_shot.selected_take_id)
-            if previous_shot.selected_take_id
-            else session.exec(
-                select(Take)
-                .where(Take.project_id == project_id, Take.shot_id == previous_shot.id)
-                .order_by(Take.index.desc())
-            ).first()
-        )
-        if previous_take is not None:
-            tail_path = abs_path(project_id, f"frames/{previous_take.id}_tail.png")
-            if tail_path.exists():
-                first_frame = str(tail_path)
+        if previous_shot.scene_id == shot.scene_id:
+            previous_take = (
+                session.get(Take, previous_shot.selected_take_id)
+                if previous_shot.selected_take_id
+                else session.exec(
+                    select(Take)
+                    .where(Take.project_id == project_id, Take.shot_id == previous_shot.id)
+                    .order_by(Take.index.desc())
+                ).first()
+            )
+            if previous_take is not None:
+                tail_path = abs_path(project_id, f"frames/{previous_take.id}_tail.png")
+                if tail_path.exists():
+                    first_frame = str(tail_path)
     index, job_id = next_seq_and_id(session, GenerationJob, project_id, "job")
     job = GenerationJob(
         id=job_id,

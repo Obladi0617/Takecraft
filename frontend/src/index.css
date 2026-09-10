@@ -858,6 +858,22 @@ textarea:focus {
   border-color: rgba(47, 191, 113, 0.45);
 }
 
+.asset-approve-btn {
+  align-self: flex-start;
+  padding: 4px 14px;
+  font-size: 12px;
+  border: 1px solid rgba(47, 191, 113, 0.5);
+  border-radius: 4px;
+  background: rgba(47, 191, 113, 0.1);
+  color: #2fbf71;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.asset-approve-btn:hover {
+  background: rgba(47, 191, 113, 0.2);
+}
+
 .asset-card-head {
   display: flex;
   align-items: center;
@@ -929,6 +945,12 @@ textarea:focus {
   max-width: 92vw;
   max-height: 86vh;
   object-fit: contain;
+}
+
+.image-modal video {
+  max-width: min(92vw, 1600px);
+  max-height: 88vh;
+  background: #000;
 }
 
 .image-modal-close {
@@ -1148,6 +1170,18 @@ textarea:focus {
   padding: 2px 8px;
   font-size: 11px;
 }
+
+.asset-history {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.asset-history summary { cursor: pointer; }
+.asset-history-list { display: flex; gap: 8px; overflow-x: auto; padding-top: 8px; }
+.asset-history-item { min-width: 110px; display: grid; gap: 5px; }
+.asset-history-item img { height: 80px; }
+.asset-history-item button { font-size: 11px; padding: 4px 6px; }
 
 .asset-actions {
   display: flex;

@@ -6,6 +6,7 @@ Asset 行 id 采用 `{owner_id}_{view}` 确定性主键，重新生成即覆盖�
 
 import hashlib
 import shutil
+import uuid
 from collections import defaultdict
 from pathlib import Path
 
@@ -25,6 +26,29 @@ LOCATION_SUBDIR = "assets/locations"
 CHARACTER_ASSET_TYPE = "CHARACTER_TURNAROUND"
 LOCATION_ASSET_TYPE = "LOCATION_REFERENCE"
 
+
+def _archive_current_asset(project_id: str, asset: Asset) -> list[dict]:
+    """Copy the current slot file into immutable history before replacing it."""
+    meta = dict(asset.meta or {})
+    versions = list(meta.get("versions") or [])
+    current = abs_path(project_id, asset.path)
+    if current.exists():
+        version_id = uuid.uuid4().hex[:12]
+        suffix = current.suffix or ".png"
+        rel = f"assets/history/{asset.id}/{version_id}{suffix}"
+        archived = abs_path(project_id, rel)
+        archived.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(current, archived)
+        versions.append({
+            "id": version_id,
+            "path": rel,
+            "source": asset.source,
+            "created_at": utcnow().isoformat(),
+            "model": meta.get("model"),
+            "seed": meta.get("seed"),
+        })
+    return versions[-30:]
+
 VIEW_LABELS = {
     "FRONT": "严格正面完整主体视图，主体朝向镜头，完整展示整体结构",
     "SIDE": "严格九十度侧面完整主体视图，仅展示侧面轮廓，禁止正面构图",
@@ -37,10 +61,16 @@ VIEW_LABELS = {
 
 
 def view_prompt(base: str, view: str) -> str:
-    return (
-        f"{base}，{VIEW_LABELS.get(view, view)}。"
-        "必须严格遵守当前视角类型，并与同组其他视角在构图和景别上可明显区分。"
-    )
+    view_rule = VIEW_LABELS.get(view, view)
+    if view in {"FRONT", "SIDE", "BACK"}:
+        return (
+            f"{base}，{view_rule}。"
+            "本次只生成一张单视角角色照片：画面中必须恰好只有一个人物、一个身体、一个头部，"
+            "人物全身完整且居中。禁止出现第二个人物、重复人物、分身、镜像人物、前后对照、"
+            "双视角、三视图、拼版、分栏、接触表或同一角色的多个姿态。"
+            "single solo character, exactly one person, one body, one pose, single-view image, no duplicate subject。"
+        )
+    return f"{base}，{view_rule}。必须严格遵守当前视角类型，只生成一张单一构图，禁止拼版或分栏。"
 
 
 MAX_CHARACTERS_PER_SHOT = 3
@@ -68,7 +98,9 @@ def refs_of(session: Session, project_id: str, owner_id: str) -> list[Asset]:
     return [a for a in rows if a.meta.get("owner_id") == owner_id]
 
 
-def character_reference_sheets(session: Session, project_id: str) -> list[str]:
+def character_reference_sheets(
+    session: Session, project_id: str, owner_ids: list[str] | None = None
+) -> list[str]:
     """把每个角色的全部视图合成一张参考板，供 FLUX.2 多图参考。
 
     FLUX.2 单次最多接收 10 张参考图；按角色合板既能把正/侧/背全部传入，
@@ -90,7 +122,10 @@ def character_reference_sheets(session: Session, project_id: str) -> list[str]:
     output_dir.mkdir(parents=True, exist_ok=True)
     priority = {"FRONT": 0, "SIDE": 1, "BACK": 2}
     sheets: list[str] = []
-    for owner_id in sorted(grouped):
+    ordered_owner_ids = owner_ids if owner_ids is not None else sorted(grouped)
+    for owner_id in ordered_owner_ids:
+        if owner_id not in grouped:
+            continue
         assets = sorted(grouped[owner_id], key=lambda a: priority.get(str(a.meta.get("view")), 9))
         panels: list[Image.Image] = []
         for asset in assets:
@@ -138,7 +173,7 @@ def location_design_prompt(location: Location) -> str:
         parts.append("关键视觉锚点 " + "、".join(location.visual_cues))
     if location.lighting_rules:
         parts.append("光线 " + "、".join(location.lighting_rules))
-    parts.append("无人空镜，电影感构图")
+    parts.append("电影感场景构图；仅在场景设定明确涉及人物时出现角色，并严格保持角色参考图身份一致")
     return "，".join(p for p in parts if p)
 
 
@@ -262,6 +297,49 @@ def enqueue_character_turnaround(
 def enqueue_location_refs(
     session: Session, project_id: str, location: Location, prompt: str
 ) -> GenerationJob:
+    # 场景只携带实际关联角色，避免一次塞入全部角色导致身份特征相互污染。
+    related_ids: list[str] = []
+    if location.scene_id:
+        shots = list(
+            session.exec(
+                select(Shot).where(
+                    Shot.project_id == project_id, Shot.scene_id == location.scene_id
+                )
+            )
+        )
+        for shot in shots:
+            for character_id in shot.character_ids:
+                if character_id not in related_ids:
+                    related_ids.append(character_id)
+    # 对场景文字明确点名的新增角色（如特洛伊木马、士兵）也加入，但总量遵守参考图上限。
+    searchable = "，".join(
+        [location.name, location.description, *location.visual_cues, *location.immutable_elements]
+    )
+    characters = list(
+        session.exec(
+            select(Character)
+            .where(Character.project_id == project_id)
+            .order_by(Character.index)
+        )
+    )
+    for character in characters:
+        short_name = character.name.replace("特洛伊", "")
+        if character.id not in related_ids and (
+            character.name in searchable or (short_name and short_name in searchable)
+        ):
+            related_ids.append(character.id)
+    related_ids = related_ids[:MAX_REFERENCE_IMAGES]
+    identity_rules: list[str] = []
+    for character_id in related_ids:
+        character = session.get(Character, character_id)
+        if character is None:
+            continue
+        identity_rules.append(
+            f"{character.name}必须严格复用其角色参考板：{character.appearance}；"
+            f"服装与结构：{character.costume}；不可变特征：{'、'.join(character.immutable_traits)}"
+        )
+    if identity_rules:
+        prompt = f"{prompt}。角色身份绑定（禁止重新设计、禁止换脸换装）：" + "；".join(identity_rules)
     return enqueue_asset_job(
         session,
         project_id,
@@ -269,7 +347,7 @@ def enqueue_location_refs(
         "LOCATION",
         prompt,
         list(LOCATION_REF_KINDS),
-        references=character_reference_sheets(session, project_id),
+        references=character_reference_sheets(session, project_id, related_ids),
     )
 
 
@@ -287,12 +365,13 @@ def store_generated_asset(
     subdir = CHARACTER_SUBDIR if asset_type == CHARACTER_ASSET_TYPE else LOCATION_SUBDIR
     suffix = Path(image_path).suffix or ".png"
     rel = f"{subdir}/{owner_id}_{view}{suffix}"
+    asset_id = f"{owner_id}_{view}"
+    asset = session.get(Asset, asset_id)
+    versions = _archive_current_asset(project_id, asset) if asset else []
     dest = abs_path(project_id, rel)
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(image_path, dest)
 
-    asset_id = f"{owner_id}_{view}"
-    asset = session.get(Asset, asset_id)
     if asset is None:
         asset = Asset(id=asset_id, project_id=project_id, type=asset_type, path=rel)
     asset.path = rel
@@ -303,6 +382,7 @@ def store_generated_asset(
         "model": model,
         "seed": seed,
         "generated_by": asset_type,
+        "versions": versions,
     }
     session.add(asset)
     session.commit()
@@ -323,14 +403,15 @@ def store_uploaded_asset(
     subdir = CHARACTER_SUBDIR if asset_type == CHARACTER_ASSET_TYPE else LOCATION_SUBDIR
     suffix = Path(filename).suffix.lower() or ".png"
     rel = f"{subdir}/{owner_id}_{view}_upload{suffix}"
+    asset_id = f"{owner_id}_{view}"
+    asset = session.get(Asset, asset_id)
+    versions = _archive_current_asset(project_id, asset) if asset else []
     dest = abs_path(project_id, rel)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
 
     # 与生成图共用同一个 id：一个视图槽位只保留一行，上传即替换自动生成结果，
     # 否则同视图会有两张参考图，shot_asset_blocks 可能超出 MAX_REFERENCE_IMAGES
-    asset_id = f"{owner_id}_{view}"
-    asset = session.get(Asset, asset_id)
     if asset is None:
         asset = Asset(id=asset_id, project_id=project_id, type=asset_type, path=rel)
     replaced_generated = asset.source == "GENERATED"
@@ -341,7 +422,31 @@ def store_uploaded_asset(
         "view": view,
         "original_name": filename,
         "replaced_generated": replaced_generated,
+        "versions": versions,
     }
+    session.add(asset)
+    session.commit()
+    session.refresh(asset)
+    return asset
+
+
+def restore_asset_version(session: Session, project_id: str, asset: Asset, version_id: str) -> Asset:
+    """Restore an archived image while keeping both current and archived versions."""
+    versions = list((asset.meta or {}).get("versions") or [])
+    version = next((item for item in versions if item.get("id") == version_id), None)
+    if version is None:
+        raise ValueError("version not found")
+    archived = abs_path(project_id, str(version.get("path") or ""))
+    if not archived.exists():
+        raise FileNotFoundError("version file not found")
+    versions = _archive_current_asset(project_id, asset)
+    current = abs_path(project_id, asset.path)
+    current.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(archived, current)
+    meta = dict(asset.meta or {})
+    meta.update({"versions": versions, "restored_from": version_id})
+    asset.meta = meta
+    asset.source = "RESTORED"
     session.add(asset)
     session.commit()
     session.refresh(asset)

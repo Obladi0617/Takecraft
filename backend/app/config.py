@@ -1,7 +1,17 @@
+import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 from pydantic import Field
 from pydantic_settings import BaseSettings
+
+# Load .env file from backend directory
+dotenv_path = Path(__file__).resolve().parents[1] / ".env"
+if dotenv_path.exists():
+    # This repository's runtime profile is authoritative.  Without override,
+    # stale user-level FILMAGENT_* variables silently win over backend/.env
+    # (the previous unavailable ModelScope model kept being selected).
+    load_dotenv(dotenv_path, override=True)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -20,7 +30,9 @@ class Settings(BaseSettings):
     image_generation_concurrency: int = 1  # 图片模型占用较大，默认串行
     video_generation_concurrency: int = 1  # 规格书第 24 节
     comfyui_base_url: str = "http://127.0.0.1:8188"
-    comfyui_timeout: float = 3600.0
+    # Long R2V scenes can take close to an hour at 1 MP.  Keep enough room for
+    # generation plus video/audio decoding and saving on the DGX.
+    comfyui_timeout: float = 7200.0
     comfyui_megapixels: float = 0.4
     comfyui_image_steps: int = 20
     comfyui_image_cfg: float = 4.0
@@ -40,6 +52,11 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = "https://api-inference.modelscope.cn"
     llm_model: str = "deepseek-ai/DeepSeek-V4-Pro"
+    # Optional direct-route override for machines whose VPN/TUN fake-DNS
+    # intercepts a domestic API endpoint.  The original hostname is retained
+    # for both the HTTP Host header and TLS SNI verification.
+    llm_connect_ip: str = ""
+    llm_local_address: str = ""
     llm_timeout: float = 120.0
     llm_max_retries: int = 3
     llm_retry_base_delay: float = 0.5

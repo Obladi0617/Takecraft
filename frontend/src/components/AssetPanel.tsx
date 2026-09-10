@@ -14,14 +14,18 @@ import {
   lockCharacter,
   lockLocation,
   patchCharacter,
+  reviseCharacterSetting,
   patchLocation,
   relinkShots,
+  reviseLocationSetting,
+  restoreAssetVersion,
   uploadCharacterRef,
   uploadLocationRef,
 } from '../api/client'
 import type { CharacterBody, LocationBody } from '../api/client'
 import type { AssetReference, AssetStatus, Character, Location } from '../api/types'
 import { useAppStore } from '../stores/app'
+import MediaModal, { type MediaPreview } from './MediaModal'
 
 const ACTIVE = new Set(['PENDING', 'RUNNING', 'RETAKE'])
 
@@ -61,19 +65,23 @@ function ViewSlot({
   reference,
   disabled,
   onUpload,
+  onPreview,
+  onRestore,
 }: {
   view: string
   reference: AssetReference | undefined
   disabled: boolean
   onUpload: (file: File) => void
+  onPreview: () => void
+  onRestore: (versionId: string) => void
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
   return (
     <div className={`asset-view ${reference ? '' : 'empty'}`}>
       {reference ? (
-        <a href={`${API_BASE}${reference.media_url}`} target="_blank" rel="noreferrer">
+        <button className="image-preview-button" onClick={onPreview} aria-label={`在当前页面查看${VIEW_LABEL[view] ?? view}`}>
           <img src={`${API_BASE}${reference.media_url}`} alt={VIEW_LABEL[view] ?? view} title="点击查看原图" />
-        </a>
+        </button>
       ) : (
         <div className="asset-view-placeholder">未生成</div>
       )}
@@ -87,6 +95,22 @@ function ViewSlot({
           上传
         </button>
       </div>
+      {(reference?.versions?.length ?? 0) > 0 && (
+        <details className="asset-history">
+          <summary>历史版本（{reference!.versions!.length}）</summary>
+          <div className="asset-history-list">
+            {[...reference!.versions!].reverse().map((version, index) => (
+              <div className="asset-history-item" key={version.id}>
+                <img src={`${API_BASE}${version.media_url}`} alt={`历史版本 ${index + 1}`} title="历史图片缩略图" />
+                <button
+                  disabled={disabled}
+                  onClick={() => window.confirm('恢复这个图片版本？当前版本也会自动保留，可再次恢复。') && onRestore(version.id)}
+                >恢复此版</button>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
       <input
         ref={inputRef}
         type="file"
@@ -107,11 +131,15 @@ function RefStrip({
   references,
   disabled,
   onUpload,
+  onPreview,
+  onRestore,
 }: {
   views: string[]
   references: AssetReference[]
   disabled: boolean
   onUpload: (view: string, file: File) => void
+  onPreview: (view: string, reference: AssetReference) => void
+  onRestore: (reference: AssetReference, versionId: string) => void
 }) {
   const byView = new Map(references.map((r) => [r.view, r]))
   return (
@@ -123,6 +151,14 @@ function RefStrip({
           reference={byView.get(view)}
           disabled={disabled}
           onUpload={(file) => onUpload(view, file)}
+          onPreview={() => {
+            const reference = byView.get(view)
+            if (reference) onPreview(view, reference)
+          }}
+          onRestore={(versionId) => {
+            const reference = byView.get(view)
+            if (reference) onRestore(reference, versionId)
+          }}
         />
       ))}
     </div>
@@ -146,12 +182,17 @@ function PromptBlock({ block, hash }: { block: string; hash: string }) {
 function CharacterForm({
   character,
   onSave,
+  onRevise,
   pending,
+  revising,
 }: {
   character: Character
   onSave: (body: CharacterBody) => void
+  onRevise: (feedback: string) => void
   pending: boolean
+  revising: boolean
 }) {
+  const [revisionFeedback, setRevisionFeedback] = useState('')
   const [name, setName] = useState(character.name)
   const [role, setRole] = useState(character.role)
   const [gender, setGender] = useState(character.gender ?? '')
@@ -165,6 +206,25 @@ function CharacterForm({
 
   return (
     <div className="asset-form">
+      <label className="wide">
+        告诉AI角色设定哪里有问题、需要怎么改
+        <textarea
+          rows={3}
+          placeholder="例如：人物太矮胖，改成身高约190cm、精壮敏捷；保留黑色短发和左眼伤疤，其他设定不要改。"
+          value={revisionFeedback}
+          onChange={(e) => setRevisionFeedback(e.target.value)}
+        />
+      </label>
+      <div className="asset-form-actions wide">
+        <button
+          className="primary"
+          disabled={revising || !revisionFeedback.trim()}
+          onClick={() => onRevise(revisionFeedback.trim())}
+        >
+          {revising ? '已提交，等待新设定返回中…' : '按意见修改角色设定'}
+        </button>
+        <span className="muted">先按意见修改文字设定，再立即按最新设定重新生成角色参考图。</span>
+      </div>
       <label>
         姓名
         <input value={name} onChange={(e) => setName(e.target.value)} />
@@ -241,13 +301,18 @@ function LocationForm({
   location,
   scenes,
   onSave,
+  onRevise,
   pending,
+  revising,
 }: {
   location: Location
   scenes: { id: string; title: string }[]
   onSave: (body: LocationBody) => void
+  onRevise: (feedback: string) => void
   pending: boolean
+  revising: boolean
 }) {
+  const [revisionFeedback, setRevisionFeedback] = useState('')
   const [name, setName] = useState(location.name)
   const [sceneId, setSceneId] = useState(location.scene_id ?? '')
   const [description, setDescription] = useState(location.description)
@@ -261,6 +326,25 @@ function LocationForm({
 
   return (
     <div className="asset-form">
+      <label className="wide">
+        告诉AI场景设定哪里有问题、需要怎么改
+        <textarea
+          rows={3}
+          placeholder="例如：场景太现代，改成荷马史诗时期的特洛伊石砌城门；整体更写实、更宏大，保留黄昏和火把照明。"
+          value={revisionFeedback}
+          onChange={(e) => setRevisionFeedback(e.target.value)}
+        />
+      </label>
+      <div className="asset-form-actions wide">
+        <button
+          className="primary"
+          disabled={revising || !revisionFeedback.trim()}
+          onClick={() => onRevise(revisionFeedback.trim())}
+        >
+          {revising ? '已提交，等待新设定返回中…' : '按意见修改场景设定'}
+        </button>
+        <span className="muted">文本API先修改设定，再自动重生成主角度和细节图。</span>
+      </div>
       <label>
         名称
         <input value={name} onChange={(e) => setName(e.target.value)} />
@@ -344,6 +428,8 @@ export default function AssetPanel() {
   const [newSource, setNewSource] = useState('AUTO')
   const [newSceneId, setNewSceneId] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [mediaPreview, setMediaPreview] = useState<MediaPreview | null>(null)
+  const [flowNotice, setFlowNotice] = useState('')
 
   const { data: jobs } = useQuery({
     queryKey: ['jobs', projectId],
@@ -382,12 +468,25 @@ export default function AssetPanel() {
   })
   const lockChar = useMutation({
     mutationFn: (id: string) => lockCharacter(projectId, id),
-    onSuccess: invalidate,
+    onSuccess: (result) => {
+      if ((result.location_jobs?.length ?? 0) > 0) {
+        setFlowNotice(`全部角色已确认，已自动提交 ${result.location_jobs!.length} 个场景生成任务。`)
+      }
+      invalidate()
+    },
   })
   const uploadChar = useMutation({
     mutationFn: ({ id, view, file }: { id: string; view: string; file: File }) =>
       uploadCharacterRef(projectId, id, file, view),
     onSuccess: invalidate,
+  })
+  const restoreAsset = useMutation({
+    mutationFn: ({ assetId, versionId }: { assetId: string; versionId: string }) =>
+      restoreAssetVersion(projectId, assetId, versionId),
+    onSuccess: () => {
+      setFlowNotice('已恢复上一版本；刚才的版本也已保留，可随时切回。')
+      invalidate()
+    },
   })
   const patchChar = useMutation({
     mutationFn: ({ id, body }: { id: string; body: CharacterBody }) =>
@@ -396,6 +495,11 @@ export default function AssetPanel() {
       setEditingId(null)
       invalidate()
     },
+  })
+  const reviseChar = useMutation({
+    mutationFn: ({ id, feedback }: { id: string; feedback: string }) =>
+      reviseCharacterSetting(projectId, id, feedback),
+    onSuccess: invalidate,
   })
   const addCharacter = useMutation({
     mutationFn: (body: CharacterBody) => createCharacter(projectId, body),
@@ -427,9 +531,21 @@ export default function AssetPanel() {
       invalidate()
     },
   })
+  const reviseLoc = useMutation({
+    mutationFn: ({ id, feedback }: { id: string; feedback: string }) =>
+      reviseLocationSetting(projectId, id, feedback),
+    onSuccess: invalidate,
+  })
   const addLocation = useMutation({
     mutationFn: (body: LocationBody) => createLocation(projectId, body),
-    onSuccess: invalidate,
+    onSuccess: (result) => {
+      setFlowNotice(result.message || '场景已创建，参考图生成任务已自动提交。')
+      setCreating(false)
+      setNewName('')
+      setNewDesc('')
+      setNewSceneId('')
+      invalidate()
+    },
   })
   const removeLocation = useMutation({
     mutationFn: (id: string) => deleteLocation(projectId, id),
@@ -446,10 +562,15 @@ export default function AssetPanel() {
   const characters = assets?.characters ?? []
   const locations = assets?.locations ?? []
   const busy = assetJobsActive
+  const busyOwnerIds = new Set(
+    (jobs ?? [])
+      .filter((job) => (job.job_type === 'CHARACTER' || job.job_type === 'LOCATION') && ACTIVE.has(job.status))
+      .map((job) => String(job.payload?.owner_id ?? '')),
+  )
   const actionError =
     tab === 'character'
-      ? [genCharacter, lockChar, uploadChar, patchChar, addCharacter, removeCharacter]
-      : [genLocation, lockLoc, uploadLoc, patchLoc, addLocation, removeLocation]
+      ? [genCharacter, lockChar, uploadChar, patchChar, reviseChar, addCharacter, removeCharacter]
+      : [genLocation, lockLoc, uploadLoc, patchLoc, reviseLoc, addLocation, removeLocation]
   const failed = actionError.find((m) => m.isError)
 
   const submitCreate = () => {
@@ -476,6 +597,13 @@ export default function AssetPanel() {
 
   return (
     <div className="asset-panel">
+      <MediaModal media={mediaPreview} onClose={() => setMediaPreview(null)} />
+      {flowNotice && (
+        <div className="review-command-notice" role="status" aria-live="polite">
+          <span>✓ {flowNotice}</span>
+          <button aria-label="关闭提示" onClick={() => setFlowNotice('')}>×</button>
+        </div>
+      )}
       <div className="asset-toolbar">
         <div className="asset-tabs">
           <button
@@ -560,6 +688,8 @@ export default function AssetPanel() {
         {tab === 'character' &&
           characters.map((c) => {
             const locked = c.status === 'LOCKED'
+            const ownerBusy = busyOwnerIds.has(c.id)
+            const submittingThisCharacter = genCharacter.isPending && genCharacter.variables === c.id
             return (
               <div key={c.id} className={`asset-card ${locked ? 'locked' : ''}`}>
                 <div className="asset-card-head">
@@ -579,20 +709,28 @@ export default function AssetPanel() {
                 <RefStrip
                   views={c.views}
                   references={c.references}
-                  disabled={busy}
+                  disabled={ownerBusy}
                   onUpload={(view, file) => uploadChar.mutate({ id: c.id, view, file })}
+                  onPreview={(view, reference) => setMediaPreview({
+                    kind: 'image',
+                    url: `${API_BASE}${reference.media_url}`,
+                    alt: `${c.name} ${VIEW_LABEL[view] ?? view}`,
+                  })}
+                  onRestore={(reference, versionId) => restoreAsset.mutate({ assetId: reference.id, versionId })}
                 />
                 <div className="asset-actions">
-                  <button disabled={busy} onClick={() => genCharacter.mutate(c.id)}>
-                    {genCharacter.isPending
-                      ? '已入队…'
+                  <button disabled={ownerBusy || submittingThisCharacter} onClick={() => genCharacter.mutate(c.id)}>
+                    {submittingThisCharacter
+                      ? '提交中…'
+                      : ownerBusy
+                        ? '生成中…'
                       : c.references.length
                         ? '重新生成三视图'
                         : '生成三视图'}
                   </button>
                   <button
                     className="primary"
-                    disabled={busy || lockChar.isPending}
+                    disabled={ownerBusy || lockChar.isPending}
                     onClick={() => lockChar.mutate(c.id)}
                   >
                     {locked ? '更新锁定' : '确认并锁定'}
@@ -606,7 +744,7 @@ export default function AssetPanel() {
                   </button>
                   <button
                     className="danger"
-                    disabled={busy || removeCharacter.isPending}
+                    disabled={ownerBusy || removeCharacter.isPending}
                     onClick={() => window.confirm(`删除角色“${c.name}”？已有图片文件会保留。`) && removeCharacter.mutate(c.id)}
                   >删除角色</button>
                 </div>
@@ -628,7 +766,9 @@ export default function AssetPanel() {
                     key={`${c.id}-${c.version}`}
                     character={c}
                     pending={patchChar.isPending}
+                    revising={reviseChar.isPending && reviseChar.variables?.id === c.id}
                     onSave={(body) => patchChar.mutate({ id: c.id, body })}
+                    onRevise={(feedback) => reviseChar.mutate({ id: c.id, feedback })}
                   />
                 )}
               </div>
@@ -638,6 +778,8 @@ export default function AssetPanel() {
         {tab === 'location' &&
           locations.map((loc) => {
             const locked = loc.status === 'LOCKED'
+            const ownerBusy = busyOwnerIds.has(loc.id)
+            const submittingThisLocation = genLocation.isPending && genLocation.variables === loc.id
             const scene = (scenes ?? []).find((s) => s.id === loc.scene_id)
             return (
               <div key={loc.id} className={`asset-card ${locked ? 'locked' : ''}`}>
@@ -653,27 +795,35 @@ export default function AssetPanel() {
                   <span className="muted">seed {loc.seed ?? '-'}</span>
                 </div>
                 <p className="asset-desc muted">
-                  {[loc.visual_style, loc.time_of_day_default].filter(Boolean).join(' · ') ||
-                    loc.description ||
+                  {loc.description ||
+                    [loc.visual_style, loc.time_of_day_default].filter(Boolean).join(' · ') ||
                     '尚未填写场景描述'}
                 </p>
                 <RefStrip
                   views={loc.views}
                   references={loc.references}
-                  disabled={busy}
+                  disabled={ownerBusy}
                   onUpload={(view, file) => uploadLoc.mutate({ id: loc.id, view, file })}
+                  onPreview={(view, reference) => setMediaPreview({
+                    kind: 'image',
+                    url: `${API_BASE}${reference.media_url}`,
+                    alt: `${loc.name} ${VIEW_LABEL[view] ?? view}`,
+                  })}
+                  onRestore={(reference, versionId) => restoreAsset.mutate({ assetId: reference.id, versionId })}
                 />
                 <div className="asset-actions">
-                  <button disabled={busy} onClick={() => genLocation.mutate(loc.id)}>
-                    {genLocation.isPending
-                      ? '已入队…'
+                  <button disabled={ownerBusy || submittingThisLocation} onClick={() => genLocation.mutate(loc.id)}>
+                    {submittingThisLocation
+                      ? '提交中…'
+                      : ownerBusy
+                        ? '生成中…'
                       : loc.references.length
                         ? '重新生成参考图'
                         : '生成参考图'}
                   </button>
                   <button
                     className="primary"
-                    disabled={busy || lockLoc.isPending}
+                    disabled={ownerBusy || lockLoc.isPending}
                     onClick={() => lockLoc.mutate(loc.id)}
                   >
                     {locked ? '更新锁定' : '确认并锁定'}
@@ -687,7 +837,7 @@ export default function AssetPanel() {
                   </button>
                   <button
                     className="danger"
-                    disabled={busy || removeLocation.isPending}
+                    disabled={ownerBusy || removeLocation.isPending}
                     onClick={() => window.confirm(`删除场景“${loc.name}”？已有图片文件会保留。`) && removeLocation.mutate(loc.id)}
                   >删除场景</button>
                 </div>
@@ -709,7 +859,9 @@ export default function AssetPanel() {
                     location={loc}
                     scenes={scenes ?? []}
                     pending={patchLoc.isPending}
+                    revising={reviseLoc.isPending && reviseLoc.variables?.id === loc.id}
                     onSave={(body) => patchLoc.mutate({ id: loc.id, body })}
+                    onRevise={(feedback) => reviseLoc.mutate({ id: loc.id, feedback })}
                   />
                 )}
               </div>

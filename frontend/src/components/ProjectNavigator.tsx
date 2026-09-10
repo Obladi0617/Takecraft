@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { createScene, createShot, fetchScenes, fetchShots } from '../api/client'
+import { createScene, fetchScenes, fetchShots } from '../api/client'
 import { useAppStore } from '../stores/app'
 
 export default function ProjectNavigator() {
@@ -9,7 +9,6 @@ export default function ProjectNavigator() {
   const setShot = useAppStore((s) => s.setShot)
   const queryClient = useQueryClient()
   const [sceneTitle, setSceneTitle] = useState('')
-  const [shotTitle, setShotTitle] = useState('')
 
   const { data: scenes } = useQuery({
     queryKey: ['scenes', projectId],
@@ -28,15 +27,6 @@ export default function ProjectNavigator() {
     },
   })
 
-  const addShot = useMutation({
-    mutationFn: (scene_id: string | null) =>
-      createShot(projectId, { scene_id, title: shotTitle }),
-    onSuccess: () => {
-      setShotTitle('')
-      queryClient.invalidateQueries({ queryKey: ['shots', projectId] })
-    },
-  })
-
   const shotsByScene = (sceneId: string | null) =>
     (shots ?? []).filter((s) => s.scene_id === sceneId)
 
@@ -52,26 +42,19 @@ export default function ProjectNavigator() {
             <div className="scene-title">
               {String(scene.index).padStart(2, '0')} {scene.title}
             </div>
-            {shotsByScene(scene.id).map((shot) => (
-              <button
-                key={shot.id}
-                className={`shot-item ${shot.id === shotId ? 'active' : ''}`}
-                onClick={() => setShot(shot.id)}
-              >
-                <span>{shot.title || shot.id}</span>
-                <span className="shot-status">
-                  {shot.selected_take_id
-                    ? `已选 ${shot.selected_take_id}`
-                    : '未选 Take'}
-                </span>
-              </button>
-            ))}
             <button
-              className="shot-item add"
-              onClick={() => addShot.mutate(scene.id)}
-              disabled={!shotTitle.trim() || addShot.isPending}
+              className={`shot-item scene-only ${shotsByScene(scene.id).some((shot) => shot.id === shotId) ? 'active' : ''}`}
+              onClick={() => {
+                const firstShot = shotsByScene(scene.id)[0]
+                if (firstShot) setShot(firstShot.id)
+              }}
             >
-              + 新建镜头（输入标题后点击）
+              <span>{shotsByScene(scene.id).length} 个镜头 · 剧本控制时长</span>
+              <span className="shot-status">
+                {shotsByScene(scene.id).length > 0 && shotsByScene(scene.id).every((shot) => shot.selected_take_id)
+                  ? '场景已选'
+                  : '等待场景视频'}
+              </span>
             </button>
           </div>
         ))}
@@ -87,11 +70,6 @@ export default function ProjectNavigator() {
           >
             新建场景
           </button>
-          <input
-            placeholder="新镜头标题"
-            value={shotTitle}
-            onChange={(e) => setShotTitle(e.target.value)}
-          />
         </div>
       </div>
     </div>

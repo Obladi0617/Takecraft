@@ -17,6 +17,7 @@ import {
   uploadTake,
 } from '../api/client'
 import { useAppStore } from '../stores/app'
+import MediaModal, { type MediaPreview } from './MediaModal'
 
 const ACTIVE = new Set(['PENDING', 'RUNNING', 'RETAKE'])
 
@@ -31,6 +32,7 @@ export default function ShotWorkspace() {
   const sbCount = 1
   const [forceAsk, setForceAsk] = useState(false)
   const [reviewFeedback, setReviewFeedback] = useState<Record<string, string>>({})
+  const [mediaPreview, setMediaPreview] = useState<MediaPreview | null>(null)
 
   const { data: shots } = useQuery({
     queryKey: ['shots', projectId],
@@ -150,6 +152,7 @@ export default function ShotWorkspace() {
 
   return (
     <div className="shot-workspace">
+      <MediaModal media={mediaPreview} onClose={() => setMediaPreview(null)} />
       <div className="shot-header">
         <h3>
           {shot.id.toUpperCase()} {shot.title}
@@ -202,9 +205,13 @@ export default function ShotWorkspace() {
               key={sb.id}
               className={`storyboard-card ${sb.is_selected ? 'selected' : ''}`}
             >
-              <a href={`${API_BASE}${sb.media_url}`} target="_blank" rel="noreferrer">
+              <button
+                className="image-preview-button"
+                onClick={() => setMediaPreview({ kind: 'image', url: `${API_BASE}${sb.media_url}`, alt: `分镜 ${sb.id}` })}
+                aria-label={`在当前页面查看分镜 ${sb.id}`}
+              >
                 <img src={`${API_BASE}${sb.media_url}`} alt={sb.id} title="点击查看原图" />
-              </a>
+              </button>
               <div className="storyboard-meta">
                 <strong>{sb.id}</strong>
                 <span className="muted">seed {sb.seed ?? '-'}</span>
@@ -214,9 +221,9 @@ export default function ShotWorkspace() {
                 <button
                   className={sb.is_selected ? 'primary' : ''}
                   onClick={() => selectSb.mutate(sb.id)}
-                  disabled={sb.is_locked || selectSb.isPending}
+                  disabled={sb.is_selected || selectSb.isPending}
                 >
-                  {sb.is_selected ? '当前选定' : '选定'}
+                  {sb.is_selected ? '当前图片版本' : '回退并选用此图片版本'}
                 </button>
                 <button
                   onClick={() => lockSb.mutate(sb.id)}
@@ -299,6 +306,12 @@ export default function ShotWorkspace() {
               className={`take-card ${shot.selected_take_id === take.id ? 'selected' : ''}`}
             >
               <video src={takeMediaUrl(take)} preload="metadata" controls />
+              <button
+                className="ghost"
+                onClick={() => setMediaPreview({ kind: 'video', url: takeMediaUrl(take), alt: `视频 ${take.id}` })}
+              >
+                在当前页面放大播放
+              </button>
               <div className="take-meta">
                 <strong>{take.id}</strong>
                 {take.duration != null && <span>{take.duration.toFixed(1)}s</span>}
@@ -342,7 +355,7 @@ export default function ShotWorkspace() {
                 onClick={() => select.mutate(take.id)}
                 disabled={select.isPending}
               >
-                {shot.selected_take_id === take.id ? '当前选用' : '选用'}
+                {shot.selected_take_id === take.id ? '当前选用' : '回退并选用此版本'}
               </button>
             </div>
           ))}

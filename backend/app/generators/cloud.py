@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import mimetypes
 import random
 import uuid
@@ -557,56 +558,135 @@ class MiniMaxVideoGenerator(_CloudVideoBackend):
 
 
 class ComfyUIVideoGenerator(_CloudVideoBackend):
-    """MiniMax H3 image-to-video through a trusted ComfyUI HTTP endpoint."""
+    """MiniMax H3 reference-to-video through a trusted ComfyUI HTTP endpoint.
+
+    支持多图参考（角色 + 场景）和首尾帧衔接。
+    """
 
     name = "comfyui:minimax-h3"
 
     def __init__(self, workdir: Path):
         self.workdir = workdir
         self.registry = CloudJobRegistry()
-        self.workflow_path = Path(__file__).parent / "workflows" / "minimax_h3_i2v.api.json"
+        self.workflow_path = Path(__file__).parent / "workflows" / "minimax_h3_r2v.api.json"
+
+    async def _upload_image(self, client: httpx.AsyncClient, base: str, path: Path) -> str:
+        """Upload image to ComfyUI and return the image name."""
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        upload = await client.post(
+            f"{base}/upload/image",
+            files={"image": (path.name, path.read_bytes(), mime)},
+            data={"type": "input", "subfolder": "takecraft", "overwrite": "true"},
+        )
+        upload.raise_for_status()
+        uploaded = upload.json()
+        return "/".join(part for part in (uploaded.get("subfolder", ""), uploaded["name"]) if part)
 
     async def _generate(self, request: VideoGenerationRequest) -> GeneratedVideo:
-        source_path = request.first_frame or next(
-            (path for path in request.reference_images if Path(path).is_file()), ""
-        )
-        source = Path(source_path)
-        if not source_path or not source.is_file():
-            raise RuntimeError("DGX 图生视频需要有效的首帧或资产参考图")
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[COMFYUI-R2V] shot={request.shot_id} first_frame={request.first_frame} ref_images={len(request.reference_images)}")
+        print(f"[COMFYUI-R2V DEBUG] Starting generation for shot {request.shot_id}")
+        print(f"[COMFYUI-R2V DEBUG] Prompt length: {len(request.prompt)}, References: {len(request.reference_images)}")
+
+        # Collect all reference images: first_frame + reference_images
+        all_images: list[Path] = []
+        if request.first_frame and Path(request.first_frame).is_file():
+            all_images.append(Path(request.first_frame))
+        for p in request.reference_images:
+            pp = Path(p)
+            if pp.is_file() and pp not in all_images:
+                all_images.append(pp)
+        if not all_images:
+            raise RuntimeError("DGX r2v 视频生成需要至少一张参考图（首帧或资产参考图）")
+        logger.info(f"[COMFYUI-R2V] using {len(all_images)} images: {[p.name for p in all_images[:5]]}")
+        print(f"[COMFYUI-R2V DEBUG] Collected {len(all_images)} reference images")
+
         base = settings.comfyui_base_url.rstrip("/")
         timeout = httpx.Timeout(60.0, read=120.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
+            print(f"[COMFYUI-R2V DEBUG] Connecting to ComfyUI at {base}")
             health = await client.get(f"{base}/system_stats")
             health.raise_for_status()
+            print(f"[COMFYUI-R2V DEBUG] ComfyUI health check passed")
             await _prepare_comfyui_model(client, base, "minimax-h3")
-            mime = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
-            upload = await client.post(
-                f"{base}/upload/image",
-                files={"image": (source.name, source.read_bytes(), mime)},
-                data={"type": "input", "subfolder": "takecraft", "overwrite": "true"},
-            )
-            upload.raise_for_status()
-            uploaded = upload.json()
-            image_name = "/".join(
-                part for part in (uploaded.get("subfolder", ""), uploaded["name"]) if part
-            )
+            print(f"[COMFYUI-R2V DEBUG] Model preparation complete")
+
+            # Upload all reference images
+            image_names: list[str] = []
+            for img_path in all_images:
+                print(f"[COMFYUI-R2V DEBUG] Uploading {img_path.name}")
+                name = await self._upload_image(client, base, img_path)
+                image_names.append(name)
+            print(f"[COMFYUI-R2V DEBUG] Uploaded {len(image_names)} images: {image_names[:3]}")
+
             workflow = json.loads(self.workflow_path.read_text(encoding="utf-8"))
             seed = random.SystemRandom().randrange(0, 2**48)
-            workflow["114"]["inputs"]["image"] = image_name
-            workflow["104"]["inputs"]["prompt"] = request.prompt
-            # H3 对齐到合法潜空间帧数；不要在适配层把所有镜头强制成五秒。
+
+            # MiniMaxH3ReferenceToVideo exposes an auto-growing ref_images input
+            # with a maximum of nine pictures.  These must be wired to
+            # ``ref_images``; wiring image tensors to ``ref_videos`` makes the
+            # workflow validate poorly and, more importantly, bypasses the
+            # reference-image conditioning path.
+            limited_image_names = image_names[:9]
+
+            # Create LoadImage nodes for each reference image
+            load_image_nodes = []
+            for i, img_name in enumerate(limited_image_names):
+                node_id = f"114_{i}" if i > 0 else "114"
+                if i == 0:
+                    workflow[node_id]["inputs"]["image"] = img_name
+                else:
+                    workflow[node_id] = {
+                        "class_type": "LoadImage",
+                        "inputs": {"image": img_name, "upload": "image"}
+                    }
+                load_image_nodes.append(node_id)
+
+            # COMFY_AUTOGROW_V3 uses dotted materialized keys in API-format
+            # workflows.  Supplying a normal list makes ComfyUI collapse a
+            # one-item list to a Tensor, while this node expects a mapping and
+            # calls ``ref_images.values()`` at execution time.
+            workflow["104"]["inputs"].pop("ref_images", None)
+            for index, node_id in enumerate(load_image_nodes):
+                workflow["104"]["inputs"][
+                    f"ref_images.ref_image_{index}"
+                ] = [node_id, 0]
+            workflow["104"]["inputs"]["ref_videos"] = []
+            workflow["104"]["inputs"]["ref_video_audios"] = []
+            workflow["104"]["inputs"]["ref_audios"] = []
+            picture_tags = ", ".join(
+                f"<Picture {index}>" for index in range(1, len(load_image_nodes) + 1)
+            )
+            workflow["104"]["inputs"]["prompt"] = (
+                f"Reference images available: {picture_tags}. "
+                f"Preserve the identities, costumes, props, architecture, and visual style "
+                f"shown in those reference images. {request.prompt}"
+            )
+            # H3 consumes an explicit frame count; the template's fixed 124
+            # frames only covers about five seconds.  Scene-level generation
+            # can be longer, so round *up* to H3's legal 5 + 17n sequence.
+            # Rounding up is important because the result is later split into
+            # exact per-shot Takes and must cover the final segment completely.
+            requested_frames = max(int(math.ceil(float(request.duration) * 24.0)), 124)
+            h3_length = 5 + int(math.ceil((requested_frames - 5) / 17.0)) * 17
+            workflow["104"]["inputs"]["length"] = min(h3_length, 3600)
             workflow["111"]["inputs"]["value"] = max(1.0, float(request.duration))
             workflow["115"]["inputs"]["aspect_ratio"] = "16:9 (Widescreen)"
             workflow["115"]["inputs"]["megapixels"] = settings.comfyui_megapixels
             workflow["15"]["inputs"]["noise_seed"] = seed
             workflow["92"]["inputs"]["filename_prefix"] = f"video/Takecraft_{request.shot_id}"
+
+            print(f"[COMFYUI-R2V DEBUG] Submitting workflow with {len(limited_image_names)} reference images")
             queued = await client.post(
                 f"{base}/prompt",
                 json={"prompt": workflow, "client_id": f"takecraft-{uuid.uuid4()}"},
             )
             if queued.is_error:
-                raise RuntimeError(f"DGX 工作流提交失败: {queued.text[:1500]}")
+                print(f"[COMFYUI-R2V DEBUG] Submission failed: {queued.text[:500]}")
+                raise RuntimeError(f"DGX 工作流提交失败：{queued.text[:1500]}")
             prompt_id = queued.json()["prompt_id"]
+            print(f"[COMFYUI-R2V DEBUG] Workflow submitted successfully, prompt_id={prompt_id}")
             deadline = asyncio.get_running_loop().time() + settings.comfyui_timeout
             while asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(POLL_INTERVAL)
@@ -616,13 +696,16 @@ class ComfyUIVideoGenerator(_CloudVideoBackend):
                 if not record:
                     continue
                 status = record.get("status", {})
+                print(f"[COMFYUI-R2V DEBUG] ComfyUI status: {status.get('status_str', 'unknown')}")
                 if status.get("status_str") == "error":
                     messages = [m[1] for m in status.get("messages", []) if m[0] == "execution_error"]
-                    raise RuntimeError(f"DGX 视频生成失败: {(messages[-1] if messages else status)}")
+                    error_detail = messages[-1] if messages else status
+                    print(f"[COMFYUI-R2V DEBUG] ComfyUI execution error: {error_detail}")
+                    raise RuntimeError(f"DGX 视频生成失败：{error_detail}")
                 output = record.get("outputs", {}).get("92", {})
                 files = output.get("images") or output.get("videos") or []
                 if not files:
-                    raise RuntimeError(f"DGX 任务完成但没有视频输出: {record.get('outputs', {})}")
+                    raise RuntimeError(f"DGX 任务完成但没有视频输出：{record.get('outputs', {})}")
                 item = files[0]
                 video = await client.get(
                     f"{base}/view",
