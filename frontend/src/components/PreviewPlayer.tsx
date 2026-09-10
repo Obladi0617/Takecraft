@@ -4,8 +4,7 @@ import { fetchTimeline } from '../api/client'
 import { useAppStore } from '../stores/app'
 
 const API_BASE =
-  (import.meta.env.VITE_API_BASE as string | undefined) ??
-  'http://127.0.0.1:8765'
+  (import.meta.env.VITE_API_BASE as string | undefined) ?? ''
 
 function clipDuration(c: { source_in: number; source_out: number | null }) {
   return Math.max((c.source_out ?? 0) - c.source_in, 0)

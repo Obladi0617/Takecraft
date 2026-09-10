@@ -9,6 +9,33 @@
 
 它把一套完整的 AI 影视生产方法，固化为**可持续运行、可暂停、可修改、可回溯、可重新生成**的多 Agent 工作流：真实影视工业中的策划、编剧、导演、分镜、Dailies 审核、选片与剪辑，被重新映射为 Agent 规划、资产锁定、Storyboard、生成、审核、选择、Timeline 与渲染。人在任何关键创作节点都可以介入。
 
+## 魔搭创空间部署
+
+创空间请选择 **Docker**，仓库根目录的 `Dockerfile` 会构建前端并由 FastAPI 在
+`0.0.0.0:7860` 统一提供网页、API 和媒体访问。运行数据默认写入平台持久化目录
+`/mnt/workspace/takecraft-data`。未配置任何外部 API 时应用仍可启动，并使用 Mock
+后端演示流程。
+
+需要真实生成时，在创空间「环境变量 / Secret」中按需配置，密钥不要提交到 Git：
+
+```text
+FILMAGENT_LLM_BACKEND=openai
+FILMAGENT_LLM_BASE_URL=<OpenAI 兼容文字 API 地址>
+FILMAGENT_LLM_API_KEY=<Secret>
+FILMAGENT_LLM_MODEL=<文字模型 ID>
+
+FILMAGENT_IMAGE_BACKEND=modelscope
+FILMAGENT_MODELSCOPE_API_KEY=<Secret>
+FILMAGENT_MODELSCOPE_BASE_URL=https://api-inference.modelscope.cn
+
+FILMAGENT_VIDEO_BACKEND=comfyui
+FILMAGENT_COMFYUI_BASE_URL=<创空间能够访问的 DGX/ComfyUI HTTPS 地址>
+```
+
+`FILMAGENT_COMFYUI_BASE_URL` 不能填写创空间里的 `127.0.0.1:8188`，除非 ComfyUI
+也运行在同一容器；远程 DGX 需要提供创空间可访问且受保护的 HTTPS 地址。部署后可用
+`/api/v1/health` 检查应用，用 `/api/v1/models/health` 检查模型配置。
+
 **本文档同时是交接文档**：接口清单、配置项、目录职责、已验证范围、已知坑与未完成项全部写在下面，接手者读完即可继续开发。设计依据见 [项目概述.md](项目概述.md)（规格书 v1.0，下文引用「§N」均指该文件章节）。
 
 ---

@@ -17,8 +17,7 @@ import type {
 export type { AssetBundle, AssetReference, Character, Location } from './types'
 
 export const API_BASE =
-  (import.meta.env.VITE_API_BASE as string | undefined) ??
-  'http://127.0.0.1:8765'
+  (import.meta.env.VITE_API_BASE as string | undefined) ?? ''
 
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> =

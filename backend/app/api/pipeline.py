@@ -337,7 +337,16 @@ def human_review_state(
                 GenerationJob.job_type == "VIDEO",
             ).order_by(GenerationJob.index.desc())
         ))
-        latest_scene_job = next((j for j in scene_jobs if (j.payload or {}).get("mode") == "scene_r2v" and (j.payload or {}).get("scene_id") == scene.id), None)
+        matching_scene_jobs = [j for j in scene_jobs if
+            (j.payload or {}).get("mode") == "scene_r2v"
+            and (j.payload or {}).get("scene_id") == scene.id]
+        active_scene_job = next((j for j in matching_scene_jobs if j.status in ACTIVE_STATUSES), None)
+        completed_scene_job = next((j for j in matching_scene_jobs if
+            j.status == "DONE" and (j.result or {}).get("scene_media_path")), None)
+        # A cancelled/failed retry must not hide the last playable scene
+        # version in the review UI. Active work takes precedence, otherwise
+        # show the newest completed full-scene render.
+        latest_scene_job = active_scene_job or completed_scene_job or (matching_scene_jobs[0] if matching_scene_jobs else None)
         result = (latest_scene_job.result or {}) if latest_scene_job else {}
         media_path = str(result.get("scene_media_path") or "").replace('\\', '/')
         scene_decision = _latest_artifact(session, project_id, "human_scene_review", scene.id)

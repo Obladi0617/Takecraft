@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +8,9 @@ from fastapi.staticfiles import StaticFiles
 from .api import api_router
 from .config import settings
 from .jobs import generation_queue
+
+
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 
 def create_app() -> FastAPI:
@@ -36,6 +40,11 @@ def create_app() -> FastAPI:
     @app.get("/api/v1/health")
     def health():
         return {"status": "ok"}
+
+    # Serve the compiled React app from the API origin in production. During
+    # local Vite development this directory is absent and behavior is unchanged.
+    if FRONTEND_DIST.is_dir():
+        app.mount("/", StaticFiles(directory=FRONTEND_DIST, html=True), name="frontend")
 
     return app
 

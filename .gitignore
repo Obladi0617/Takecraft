@@ -28,3 +28,9 @@ data/
 *.db
 *.db-journal
 *.sqlite3
+
+# 本地运行日志、生成数据与临时交付物
+*.log
+data-dgx-run/
+output/
+EXTRACTED_SCREENPLAY.md

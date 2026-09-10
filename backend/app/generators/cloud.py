@@ -690,8 +690,15 @@ class ComfyUIVideoGenerator(_CloudVideoBackend):
             deadline = asyncio.get_running_loop().time() + settings.comfyui_timeout
             while asyncio.get_running_loop().time() < deadline:
                 await asyncio.sleep(POLL_INTERVAL)
-                response = await client.get(f"{base}/history/{prompt_id}")
-                response.raise_for_status()
+                # A dropped SSH tunnel must not turn a still-running DGX job
+                # into FAILED. Keep polling the same prompt after reconnect;
+                # never submit a duplicate render for a transient network gap.
+                try:
+                    response = await client.get(f"{base}/history/{prompt_id}")
+                    response.raise_for_status()
+                except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+                    logger.warning("[COMFYUI-R2V] polling interrupted for %s: %s; reconnecting", prompt_id, exc)
+                    continue
                 record = response.json().get(prompt_id)
                 if not record:
                     continue
@@ -707,11 +714,15 @@ class ComfyUIVideoGenerator(_CloudVideoBackend):
                 if not files:
                     raise RuntimeError(f"DGX 任务完成但没有视频输出：{record.get('outputs', {})}")
                 item = files[0]
-                video = await client.get(
-                    f"{base}/view",
-                    params={"filename": item["filename"], "subfolder": item.get("subfolder", ""), "type": item.get("type", "output")},
-                )
-                video.raise_for_status()
+                try:
+                    video = await client.get(
+                        f"{base}/view",
+                        params={"filename": item["filename"], "subfolder": item.get("subfolder", ""), "type": item.get("type", "output")},
+                    )
+                    video.raise_for_status()
+                except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+                    logger.warning("[COMFYUI-R2V] download interrupted for %s: %s; reconnecting", prompt_id, exc)
+                    continue
                 self.workdir.mkdir(parents=True, exist_ok=True)
                 dst = self.workdir / f"dgx_{prompt_id}.mp4"
                 dst.write_bytes(video.content)
