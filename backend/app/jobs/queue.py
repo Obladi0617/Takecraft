@@ -12,7 +12,7 @@ from ..db import abs_path, get_engine, project_path
 from ..domain import Character, GenerationJob, Location, Shot, Storyboard, Take
 from ..generators import get_image_generator, get_video_generator
 from ..generators.base import ImageGenerationRequest, VideoGenerationRequest
-from ..media.ffmpeg import make_proxy, probe_duration
+from ..media.ffmpeg import make_proxy, probe_duration, trim_to_duration
 from ..repositories import next_seq_and_id
 
 PRIORITY_RANK = {"CRITICAL": 0, "HIGH": 1, "NORMAL": 2, "LOW": 3}
@@ -438,9 +438,10 @@ class GenerationQueue:
             scene_rel = f"takes/scenes/{payload.get('scene_id')}/{job.id}.mp4"
             scene_dest = abs_path(job.project_id, scene_rel)
             scene_dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(staged, scene_dest)
+            if not await asyncio.to_thread(trim_to_duration, staged, scene_dest, target_duration):
+                shutil.copy2(staged, scene_dest)
             scene_proxy_rel = f"proxies/scenes/{payload.get('scene_id')}/{job.id}.mp4"
-            scene_proxy = make_proxy(staged, abs_path(job.project_id, scene_proxy_rel))
+            scene_proxy = make_proxy(scene_dest, abs_path(job.project_id, scene_proxy_rel))
             take_ids: list[str] = []
             offset = 0.0
             try:
@@ -484,7 +485,7 @@ class GenerationQueue:
                     "adapter_job_id": adapter_job_id, "mode": "scene_r2v",
                     "scene_id": payload.get("scene_id"),
                     "scene_media_path": scene_proxy_rel if scene_proxy else scene_rel,
-                    "duration": actual_duration}
+                    "duration": target_duration}
 
         shot = session.get(Shot, payload["shot_id"])
         if shot is None:

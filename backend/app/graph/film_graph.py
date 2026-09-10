@@ -1229,11 +1229,35 @@ async def resume_film_pipeline(project_id: str) -> dict:
         project = session.get(Project, project_id)
         if project is None:
             raise RuntimeError("project not found")
-        shot_ids = [
-            shot.id
-            for shot in _shots_of_project(session, project_id)
-            if not takes_of_shot(session, project_id, shot.id)
-        ]
+        all_shots = _shots_of_project(session, project_id)
+        # A scene is complete only when the new scene-level R2V source exists
+        # and was generated for the current screenplay duration. Legacy jobs
+        # that only left split Takes must be regenerated as complete scenes.
+        scene_jobs = list(session.exec(
+            select(GenerationJob).where(
+                GenerationJob.project_id == project_id,
+                GenerationJob.job_type == "VIDEO",
+                GenerationJob.status == "DONE",
+            ).order_by(GenerationJob.index.desc())
+        ))
+        shot_ids: list[str] = []
+        scene_keys = list(dict.fromkeys(shot.scene_id or f"shot:{shot.id}" for shot in all_shots))
+        for scene_key in scene_keys:
+            scene_shots = [shot for shot in all_shots if (shot.scene_id or f"shot:{shot.id}") == scene_key]
+            expected = sum(max(float(shot.duration_target), 1.0) for shot in scene_shots)
+            latest = next((job for job in scene_jobs if
+                (job.payload or {}).get("mode") == "scene_r2v"
+                and (job.payload or {}).get("scene_id") == scene_key), None)
+            result = (latest.result or {}) if latest else {}
+            media_path = str(result.get("scene_media_path") or "")
+            generated_for = float((latest.payload or {}).get("duration") or 0.0) if latest else 0.0
+            complete = bool(
+                media_path
+                and abs_path(project_id, media_path).is_file()
+                and abs(generated_for - expected) <= 0.05
+            )
+            if not complete:
+                shot_ids.extend(shot.id for shot in scene_shots)
     initial: ProductionState = {
         "project_id": project_id,
         "idea": project.idea or project.name,
